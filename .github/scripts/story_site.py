@@ -343,7 +343,7 @@ def partition_story_assets(stories: list[int], rows: list[dict], has) -> tuple[l
     return ready, deferred
 
 
-def check_jp_story_assets(stories: list[int]) -> tuple[list[int], list[dict]]:
+def check_story_assets(stories: list[int]) -> tuple[list[int], list[dict]]:
     from nnnotes.cli import master_dir, open_catalog
     from nnnotes.config import Config
 
@@ -366,11 +366,12 @@ def cmd_build(site_dir: str, ids: list[str]) -> None:
             # A Pool keeps replacing workers whose initializer cannot open the JP catalog. Check the API once
             # in the parent before any pool starts so a denied runner fails promptly with the original error.
             check_jp_api()
-            stories, deferred = check_jp_story_assets(stories)
-            (site.parent / f"{site.name}.deferred.json").write_text(json.dumps(deferred, indent=1), encoding="utf-8")
-            if deferred:
-                summary(f"- deferred {len(deferred)} stories: episode script absent from the current catalog; "
-                        "retry on the next run\n" + "\n".join(f"  - {r['id']}: `{r['asset']}`" for r in deferred))
+    if stories:
+        stories, deferred = check_story_assets(stories)
+        (site.parent / f"{site.name}.deferred.json").write_text(json.dumps(deferred, indent=1), encoding="utf-8")
+        if deferred:
+            summary(f"- deferred {len(deferred)} stories: episode script absent from the current catalog; "
+                    "retry on the next run\n" + "\n".join(f"  - {r['id']}: `{r['asset']}`" for r in deferred))
     status = 0
     report = site.parent / f"{site.name}.build.json"
     report.unlink(missing_ok=True)

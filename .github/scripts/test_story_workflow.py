@@ -267,11 +267,16 @@ def test_jp_api_denial_stops_before_any_build_workers(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("region", ["jp", "hk-tw-mo"])
-def test_build_runs_after_successful_jp_preflight_and_international_needs_none(tmp_path, monkeypatch, region):
+def test_build_checks_assets_in_both_regions_but_api_only_in_jp(tmp_path, monkeypatch, region):
     monkeypatch.setenv("MASTERDATA_REGION", region)
     monkeypatch.setattr(story_site, "configure_region", lambda: None)
-    monkeypatch.setattr(story_site, "check_jp_story_assets", lambda ids: (ids, []))
-    calls = []
+    checked, calls = [], []
+
+    def check_assets(ids):
+        checked.append(ids)
+        return ids, []
+
+    monkeypatch.setattr(story_site, "check_story_assets", check_assets)
 
     def run(command, **kwargs):
         calls.append(command)
@@ -279,6 +284,8 @@ def test_build_runs_after_successful_jp_preflight_and_international_needs_none(t
 
     monkeypatch.setattr(story_site.subprocess, "run", run)
     story_site.cmd_build(str(tmp_path / "site"), ["10946"])
+    assert checked == [[10946]]
+    assert json.loads((tmp_path / "site.deferred.json").read_text()) == []
     if region == "jp":
         assert calls.pop(0)[-2:] == ["master", "version"]
     assert len(calls) == 2
@@ -302,15 +309,18 @@ def test_unknown_master_row_is_not_treated_as_unpublished_assets():
         story_site.partition_story_assets([11198], [], lambda key: False)
 
 
+@pytest.mark.parametrize("region", ["jp", "hk-tw-mo"])
+@pytest.mark.parametrize("force", ["false", "true"])
 @pytest.mark.parametrize("ready,build_status", [([], 0), ([10946], 0), ([10946], 1)])
-def test_build_defers_unavailable_assets_and_preserves_export_failures(tmp_path, monkeypatch, ready, build_status):
-    monkeypatch.setenv("MASTERDATA_REGION", "jp")
-    monkeypatch.setenv("FORCE", "false")
+def test_build_defers_unavailable_assets_and_preserves_export_failures(tmp_path, monkeypatch, region, force,
+                                                                     ready, build_status):
+    monkeypatch.setenv("MASTERDATA_REGION", region)
+    monkeypatch.setenv("FORCE", force)
     monkeypatch.setattr(story_site, "configure_region", lambda: None)
     monkeypatch.setattr(story_site, "check_jp_api", lambda: None)
     deferred = [{"id": 11198, "asset": "Adv/Episode/episode_11198/episode_11198",
                  "reason": "episode script absent from catalog"}]
-    monkeypatch.setattr(story_site, "check_jp_story_assets", lambda ids: (ready, deferred))
+    monkeypatch.setattr(story_site, "check_story_assets", lambda ids: (ready, deferred))
     calls, summaries = [], []
     monkeypatch.setattr(story_site, "summary", summaries.append)
 
@@ -330,5 +340,54 @@ def test_build_defers_unavailable_assets_and_preserves_export_failures(tmp_path,
     assert report.exists() == bool(ready)
     assert calls[-1][-1] == "--player-only"
     assert all("11198" not in command for command in calls)
+    if ready:
+        assert ("--force" in calls[0]) == (force == "true")
     assert json.loads((tmp_path / "site.deferred.json").read_text()) == deferred
     assert "retry on the next run" in summaries[0] and "11198" in summaries[0]
+
+
+def test_international_defers_event_6_and_another_story_scripts_missing_from_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("MASTERDATA_REGION", "hk-tw-mo")
+    monkeypatch.setattr(story_site, "configure_region", lambda: None)
+    rows = [{"_id": 10945 + episode, "_advEpisodeAsset": f"adv_script_eventstory_6_{episode:02}"}
+            for episode in range(1, 8)]
+    rows += [{"_id": story, "_advEpisodeAsset": f"adv_script_anotherstory_{story}"} for story in (10953, 10954)]
+    ids = [row["_id"] for row in rows]
+    present = {"Adv/Episode/adv_script_eventstory_5_01/adv_script_eventstory_5_01"}
+    monkeypatch.setattr(story_site, "check_story_assets",
+                        lambda stories: story_site.partition_story_assets(stories, rows, present.__contains__))
+    calls, summaries = [], []
+    monkeypatch.setattr(story_site, "summary", summaries.append)
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(story_site.subprocess, "run", run)
+    story_site.cmd_build(str(tmp_path / "site"), list(map(str, ids)))
+    assert len(calls) == 1 and calls[0][-1] == "--player-only"
+    assert "--story" not in calls[0]
+    assert not (tmp_path / "site.build.json").exists()
+    deferred = json.loads((tmp_path / "site.deferred.json").read_text())
+    assert deferred == [{"id": row["_id"], "asset": f"Adv/Episode/{row['_advEpisodeAsset']}/{row['_advEpisodeAsset']}",
+                         "reason": "episode script absent from catalog"} for row in rows]
+    assert "deferred 9 stories" in summaries[0]
+    assert all(record["asset"] in summaries[0] for record in deferred)
+
+
+@pytest.mark.parametrize("region", ["jp", "hk-tw-mo"])
+def test_catalog_preflight_errors_are_not_deferred(tmp_path, monkeypatch, region):
+    monkeypatch.setenv("MASTERDATA_REGION", region)
+    monkeypatch.setattr(story_site, "configure_region", lambda: None)
+    monkeypatch.setattr(story_site, "check_jp_api", lambda: None)
+
+    def check_assets(ids):
+        raise RuntimeError("catalog download failed")
+
+    monkeypatch.setattr(story_site, "check_story_assets", check_assets)
+    calls = []
+    monkeypatch.setattr(story_site.subprocess, "run", lambda command, **kwargs: calls.append(command))
+    with pytest.raises(RuntimeError, match="catalog download failed"):
+        story_site.cmd_build(str(tmp_path / "site"), ["10946"])
+    assert calls == []
+    assert not (tmp_path / "site.deferred.json").exists()
