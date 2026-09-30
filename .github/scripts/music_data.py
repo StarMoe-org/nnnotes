@@ -1339,10 +1339,17 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
             print(f"would upload {b.prefix}{key}")
     else:
         story_site.parallel(lambda s: upload(b, s[0], s[1], s[2]), [s for s in steps if not s[3]])
-        for key, src, cache, check in steps:
-            if check:
-                upload(b, key, src, cache)
-                read_back(b, key, sha256(src.read_bytes()))
+        checked = [s for s in steps if s[3]]
+        # replay_resources puts its manifest last. Every independent payload must
+        # upload AND read back successfully before manifest, file and marker.
+        barriers = 3 if runtime else 2
+        def upload_checked(step):
+            key, src, cache, _ = step
+            upload(b, key, src, cache)
+            read_back(b, key, sha256(src.read_bytes()))
+        story_site.parallel(upload_checked, checked[:-barriers], workers=8)
+        for step in checked[-barriers:]:
+            upload_checked(step)
     summary(f"- {'would publish' if dry_run else 'published'} {len(new)} jackets (of {len(jackets)}), "
             f"{'the archive copy, ' if not archived else ''}{FILE} ({len(raw)} bytes, sha256 "
             f"{short(marker['sha256'])}), {MARKER}: {public_url(FILE)}")

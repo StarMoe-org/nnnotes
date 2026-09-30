@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -750,7 +751,8 @@ def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatc
     music_data.cmd_publish(str(out))
     keys = [k for k, _, _ in s3.log]
     runtime = ["music-data/" + p.relative_to(out).as_posix() for p in paths]
-    assert keys[-len(runtime)-2:] == [*runtime, "music-data/music-data.json", "music-data/build.json"]
+    assert keys[-3:] == [runtime[-1], "music-data/music-data.json", "music-data/build.json"]
+    assert set(runtime[:-1]).issubset(keys[:-3])
     types = {k: mime for k, _, mime in s3.log}
     assert types["music-data/replay/engine/ournotes_replay_bg.wasm"] == "application/wasm"
 
@@ -803,6 +805,44 @@ def test_replay_read_back_failure_stops_before_runtime_pointer(tmp_path, monkeyp
     assert "music-data/replay/manifest.json" not in s3.store
     assert "music-data/music-data.json" not in s3.store
     assert "music-data/build.json" not in s3.store
+
+
+@pytest.mark.parametrize("corrupt", [None, "archive", "runtime"])
+def test_parallel_payload_readbacks_finish_before_any_pointer(tmp_path, monkeypatch, corrupt):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    doc, _ = replay_out(out)
+    paths = music_data.replay_resources(out, doc)
+    archive = json.loads((out / music_data.MARKER).read_bytes())["archive"]
+    payloads = {archive, *(p.relative_to(out).as_posix() for p in paths[:-1])}
+    pointers = [paths[-1].relative_to(out).as_posix(), music_data.FILE, music_data.MARKER]
+    if corrupt:
+        key = archive if corrupt == "archive" else "replay/engine/ournotes_replay_bg.wasm"
+        s3.corrupt = "music-data/" + key
+        monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
+    original = music_data.read_back
+    pair, lock, verified, started = threading.Barrier(2), threading.Lock(), set(), []
+    def read_back(b, key, digest):
+        if key in payloads:
+            with lock:
+                started.append(key)
+                overlap = len(started) <= 2
+            if overlap:
+                pair.wait(timeout=5)  # Sequential payload execution cannot pass.
+        else:
+            assert payloads <= verified  # Upload completion alone is insufficient.
+        original(b, key, digest)
+        with lock:
+            verified.add(key)
+    monkeypatch.setattr(music_data, "read_back", read_back)
+    if corrupt:
+        with pytest.raises(SystemExit, match="does not serve what was uploaded"):
+            music_data.cmd_publish(str(out))
+        assert all("music-data/" + key not in s3.store for key in pointers)
+    else:
+        music_data.cmd_publish(str(out))
+        assert payloads <= verified
+        assert [key for key, _, _ in s3.log][-3:] == ["music-data/" + key for key in pointers]
 
 
 @pytest.mark.parametrize("change", ["wrong-head", "untracked-source", "changed-during-build", None])
