@@ -5,7 +5,8 @@ the stories it lacks.
     regions               the regions this run builds (GitHub outputs `regions`, a JSON list, and `count`): those of
                           $STORY_REGIONS (default hk-tw-mo) that the repository_dispatch payload names, or
                           $REQUESTED_REGION of a workflow_dispatch (empty / "all": every one), or all on a schedule
-    plan                  the stories to build: $REQUESTED, else every MasterAdv id without a manifest in the bucket
+    plan                  the stories to build: MasterAdv ids absent from this site and, for JP, the international
+                          site ($STORY_S3_PREFIX_SHARED); $REQUESTED narrows the ids, $FORCE rebuilds requested ids
                           (at most $STORY_LIMIT, in id order); GitHub outputs `stories` (space separated) and `count`
     master OUT            the decoded master data of $MASTERDATA_REGION from moenotes-masterdata-sync (index.json:
                           every table with its SHA-256), for `nnnotes web`
@@ -29,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -81,7 +83,7 @@ def summary(text: str) -> None:
 
 # ---------------------------------------------------------------- bucket
 class Bucket:
-    def __init__(self):
+    def __init__(self, prefix: str | None = None):
         import boto3
         from botocore import UNSIGNED
         from botocore.config import Config
@@ -94,20 +96,37 @@ class Bucket:
         self.s3 = boto3.client("s3", endpoint_url=env("STORY_S3_ENDPOINT"), aws_access_key_id=key or None,
                                aws_secret_access_key=secret or None, region_name="us-east-1", config=config)
         self.name = env("STORY_S3_BUCKET")
-        prefix = os.environ.get("STORY_S3_PREFIX", "").strip("/")
+        prefix = (os.environ.get("STORY_S3_PREFIX", "") if prefix is None else prefix).strip("/")
         self.prefix = f"{prefix}/" if prefix else ""
+        # A root site's fetch/publish must not include the JP subsite (including its assets).
+        jp_prefix = env("STORY_S3_PREFIX_JP", "jp").strip("/") + "/"
+        self.exclude = (jp_prefix[len(self.prefix):]
+                        if jp_prefix != self.prefix and jp_prefix.startswith(self.prefix) else None)
 
     def keys(self, sub: str = "") -> dict[str, int]:
         """{site path: size} of the objects under `sub` (a site path prefix)."""
         out = {}
         for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.name, Prefix=self.prefix + sub):
             for o in page.get("Contents", []):
-                out[o["Key"][len(self.prefix):]] = o["Size"]
+                path = o["Key"][len(self.prefix):]
+                if not self.exclude or not path.startswith(self.exclude):
+                    out[path] = o["Size"]
         return out
 
     def download(self, path: str, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         self.s3.download_file(self.name, self.prefix + path, str(dest))
+
+    def published_story_ids(self) -> set[int]:
+        """Stories advertised to the player, over public HTTP (anonymous S3 listings can be empty)."""
+        url = f"{env('STORY_S3_ENDPOINT').rstrip('/')}/{self.name}/{self.prefix}stories.json"
+        try:
+            index = json.loads(get(url, 60))
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return set()   # a site that has not been published yet
+            raise
+        return {entry["advId"] for entry in index["stories"]}
 
     def upload(self, path: str, src: Path) -> None:
         suffix = Path(path).suffix.lower()
@@ -240,17 +259,25 @@ def cmd_plan() -> None:
         sys.exit("story_site: MasterAdv.json: SHA-256 differs from index.json (run again)")
     stories = sorted(row["_id"] for row in json.loads(data)["_allData"])   # nnnotes storysite.all_stories
     have = {int(m.group(1)) for k in Bucket().keys("stories/") if (m := STORY_MANIFEST.fullmatch(k))}
+    shared = set()
+    if env("MASTERDATA_REGION") == "jp":
+        shared = Bucket(prefix=os.environ.get("STORY_S3_PREFIX_SHARED", "")).published_story_ids()
+    available = have | shared
+    reused = set(stories) & (shared - have)
     requested = parse_ids(os.environ.get("REQUESTED", ""))
     if requested:
         unknown = [i for i in requested if i not in set(stories)]
         if unknown:
             sys.exit(f"story_site: no MasterAdv row for {', '.join(map(str, unknown))}")
-        todo, missing = requested, [i for i in requested if i not in have]
+        missing = [i for i in requested if i not in available]
+        todo = requested if os.environ.get("FORCE") == "true" else missing
     else:
-        missing = [i for i in stories if i not in have]
+        missing = [i for i in stories if i not in available]
         todo = missing[:int(env("STORY_LIMIT", "40"))]
     summary(f"### Story site\n\n- master: {region.get('entry', {}).get('version', '?')} "
-            f"({len(stories)} stories), the site has {len(have)}\n- missing: {len(missing)}; this run builds "
+            f"({len(stories)} stories), the site has {len(have)}\n"
+            + (f"- reused from the international site: {len(reused)}\n" if env("MASTERDATA_REGION") == "jp" else "")
+            + f"- missing: {len(missing)}; this run builds "
             f"{len(todo)}" + (f": {' '.join(map(str, todo))}" if todo else ""))
     output("stories", " ".join(map(str, todo)))
     output("count", str(len(todo)))

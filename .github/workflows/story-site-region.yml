@@ -1,7 +1,7 @@
 name: Story site (one region)
 
 # One region's story site: plan the stories its site lacks, build them, publish. Called by story-site.yml once per
-# region (a matrix); every region's site is separate (its own bucket prefix, master data, APK and catalog).
+# region (a matrix); JP reuses advIds published internationally and builds the missing ones in its own prefix.
 
 on:
   workflow_call:
@@ -29,6 +29,9 @@ env:
   STORY_S3_ENDPOINT: ${{ vars.STORY_S3_ENDPOINT || 'https://storage.bdon.moe' }}
   STORY_S3_BUCKET: ${{ vars.STORY_S3_BUCKET || 'moenotes' }}
   STORY_S3_PREFIX: ${{ inputs.region == 'jp' && (vars.STORY_S3_PREFIX_JP || 'jp') || (vars.STORY_S3_PREFIX || '') }}
+  STORY_S3_PREFIX_JP: ${{ vars.STORY_S3_PREFIX_JP || 'jp' }}
+  # JP's planner reuses shared advIds from the international site; an empty prefix means the bucket root.
+  STORY_S3_PREFIX_SHARED: ${{ vars.STORY_S3_PREFIX || '' }}
   # moenotes-masterdata-sync: decoded master data by region (index.json lists every table with its SHA-256).
   MASTERDATA_BASE_URL: ${{ vars.MASTERDATA_BASE_URL || 'https://metadata.bdon.moe' }}
   MASTERDATA_REGION: ${{ inputs.region }}
@@ -65,13 +68,16 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-      - run: uv pip install --system --quiet boto3
+      - run: uv pip install --system --quiet boto3 pytest
+      - name: Test story planning and site isolation
+        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_story_workflow.py
       - name: Stories to build
         id: plan
         env:
           STORY_S3_ACCESS_KEY: ${{ secrets.STORY_S3_ACCESS_KEY }}
           STORY_S3_SECRET_KEY: ${{ secrets.STORY_S3_SECRET_KEY }}
           REQUESTED: ${{ inputs.stories }}
+          FORCE: ${{ inputs.force }}
         run: python .github/scripts/story_site.py plan
 
   build:

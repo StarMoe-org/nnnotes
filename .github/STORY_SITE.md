@@ -4,7 +4,9 @@
 lacks with this repository's `nnnotes web --story` and uploads them to the bucket that serves the site
 (`https://storage.bdon.moe/moenotes/`, the layout `nnnotes web` writes: `stories.json`, `stories/`, `models/`,
 `assets/`, `story/`), one site per game region: `hk-tw-mo` at the bucket root, `jp` under `jp/`
-(`https://storage.bdon.moe/moenotes/jp/`; JP Live2D model ids overlap the international ones). It only adds: a run
+(`https://storage.bdon.moe/moenotes/jp/`; JP Live2D model ids overlap the international ones). JP reuses advIds already
+published internationally and only builds stories missing from both sites. MoeNotes merges the two indexes and
+plays shared advIds from the international site, preserving all its text languages. It only adds: a run
 never deletes anything from the bucket. Its helper steps are in
 `.github/scripts/`; nothing outside `.github/` differs from upstream, so the fork syncs with it as before.
 
@@ -16,13 +18,16 @@ never deletes anything from the bucket. Its helper steps are in
 
 1. **plan** (a few seconds): the MasterAdv ids of the decoded master data of moenotes-masterdata-sync
    (`MasterAdv.json`, SHA-256 checked against its `index.json`) against the `stories/<id>.json` objects of the bucket.
-   The ids without a manifest, at most `STORY_LIMIT` (40) in id order, are the run's stories; none: the run ends here.
+   JP also reads the public international `stories.json` (`STORY_S3_PREFIX`, empty by default), as the player does.
+   It skips ids already advertised there, even when anonymous S3 listings return no objects. The remaining ids
+   without a local manifest, at most `STORY_LIMIT` (40) in id order, are the run's stories; none: the run ends here.
+   Existing shared stories and their assets stay at the international site; they are not copied into `jp/`.
 2. **build** (only when there is something to build):
    - fonts (pinned by SHA-256: the files the published stories record in `ui/fonts.json`), vgmstream, ffmpeg, the
      built ournotes-player (`STORY_PLAYER_REF`), the APK (playfetch with the account in `PLAYFETCH_CREDENTIALS`), the
      decoded master data;
-   - every object of the site except `assets/` (the manifests and indexes, about 150 MB), over plain HTTP like the
-     player's browser: the bucket serves public read, and Cloudflare's S3-signed ranged downloads were rejected
+   - every object of the site except `assets/` and the nested JP site (the manifests and indexes, about 150 MB),
+     over plain HTTP like the player's browser: the bucket serves public read, and Cloudflare's S3-signed ranged downloads were rejected
      intermittently with `SignatureDoesNotMatch`;
    - `nnnotes web site --story <id> ...` (with the Live2D models these stories load that the site lacks), then
      `nnnotes web site --player-only`, which rewrites `stories.json`, `models.json`, `charts.json` and the player
@@ -36,12 +41,14 @@ snapshot: `dispatch_repositories`), a daily schedule (03:23 UTC) in case a dispa
 
 | Input | Meaning |
 |---|---|
-| `stories` | MasterAdv ids to build (spaces or commas); empty: every story the site lacks |
+| `stories` | MasterAdv ids to build (spaces or commas); existing ids are skipped unless forced; empty: missing ids (JP also checks the international site) |
 | `force` | rebuild the given stories and their Live2D models although their manifests exist |
 | `region` | `all` (every region of `STORY_REGIONS`), `hk-tw-mo` or `jp` |
 | `dry_run` | build, then list what would be uploaded instead of uploading |
 
 Runs of one region do not overlap (`concurrency: story-site-<region>`); the regions build side by side.
+The JP index lists only stories built under `jp/`; MoeNotes reads the international index as well. To rebuild a
+shared story specifically from JP data, choose `region=jp`, its `stories` id(s), and `force=true`.
 
 ## Settings
 
