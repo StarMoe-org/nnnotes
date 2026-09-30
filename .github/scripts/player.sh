@@ -8,4 +8,10 @@ if [ ! -f "$dir/dist/ournotes-player.element.min.js" ] || [ "$(git -C "$dir" rev
   git -C "$dir" checkout --quiet "$PLAYER_REF"
   (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund && npm run build)
 fi
+for file in index.html songs.js catalog.js text.js replay-panel.js replay-worker.js replay-preset.js; do
+  if [ ! -f "$dir/examples/songs/$file" ]; then
+    echo "player revision lacks examples/songs/$file: set STORY_PLAYER_REF to the current replay-enabled player commit" >&2
+    exit 1
+  fi
+done
 echo "ournotes-player $(git -C "$dir" rev-parse --short HEAD) ($(node -p "require('$dir/package.json').version"))"
