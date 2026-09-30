@@ -33,6 +33,8 @@ never deletes anything from the bucket. Its helper steps are in
    - `nnnotes web site --story <id> ...` (with the Live2D models these stories load that the site lacks), then
      `nnnotes web site --player-only`, which rewrites `stories.json`, `models.json`, `charts.json` and the player
      pages from every manifest present, also after a failed build;
+     JP first checks `nnnotes master version` before starting workers. A denied API call stops the run promptly;
+     it cannot obtain the CDN authentication from the public master snapshot alone;
    - upload: check each asset with S3 HEAD and upload missing assets or those whose sizes differ, then the new or
      changed manifests and player files, the indexes last.
      Stories that failed have no manifest, so the next run builds them again; their errors are in the job summary.
@@ -72,6 +74,13 @@ Repository variables (optional; the defaults are the StarMoe site): `STORY_S3_EN
 
 ## Notes
 
+- **JP network.** The Linux build runner first checks anonymous Version directly. When that is refused, it fetches
+  VPNGate's public CSV list and tries up to six Japanese OpenVPN relays in score order. Only the resolved JP API/CDN
+  IPv4 addresses get VPN host routes; the names are pinned for that run. A relay is accepted only after Version
+  succeeds, and the VPN is disconnected in an `always()` cleanup step. No extra repository secret is needed.
+  `current_version.json`'s `assets` fields contain the original CDN locations; the API still supplies the required
+  CDN authentication. Generated VPN profiles use connection fields and certificates, discarding supplied scripts
+  and routes. The helpers are `jp_vpngate.py` and `story_site.py jp-check`.
 - **The player version.** The site's player pages come from `STORY_PLAYER_REF`, and its data must be what that player
   reads. After a player release that changes the data format, sync this fork with upstream nnnotes and set
   `STORY_PLAYER_REF` to the matching player; new stories are then written for it. Stories already published are

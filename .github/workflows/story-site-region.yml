@@ -70,7 +70,7 @@ jobs:
           enable-cache: true
       - run: uv pip install --system --quiet boto3 pytest
       - name: Test story planning, fetching and publishing
-        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_story_workflow.py
+        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_story_workflow.py .github/scripts/test_jp_vpngate.py
       - name: Stories to build
         id: plan
         env:
@@ -115,6 +115,12 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
           .github/scripts/tools.sh "$WORK/tools"
+
+      - name: JP API network access
+        if: inputs.region == 'jp'
+        run: |
+          sudo apt-get install -y -qq openvpn > /dev/null
+          python .github/scripts/jp_vpngate.py start
 
       - name: Fonts
         uses: actions/cache@v6
@@ -178,3 +184,7 @@ jobs:
         run: |
           f="$WORK/site.story-failures.json"
           if [ -f "$f" ]; then echo "::error::stories failed (${{ inputs.region }}), see the job summary"; { echo '### Failed stories (${{ inputs.region }})'; echo '```json'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Disconnect JP VPN
+        if: always() && inputs.region == 'jp'
+        run: python .github/scripts/jp_vpngate.py stop

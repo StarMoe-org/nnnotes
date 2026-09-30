@@ -246,3 +246,39 @@ def test_publish_skips_existing_assets_and_uploads_indexes_last(tmp_path, monkey
     assert set(checked) == {"assets/existing.gz", "assets/new.gz", "assets/changed.gz"}
     assert set(uploaded[:2]) == {"assets/new.gz", "assets/changed.gz"}
     assert uploaded[2:] == ["stories/10946.json", "stories.json"]
+
+
+def test_jp_api_denial_stops_before_any_build_workers(tmp_path, monkeypatch):
+    monkeypatch.setenv("MASTERDATA_REGION", "jp")
+    monkeypatch.setattr(story_site, "configure_region", lambda: None)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[2:] == ["nnnotes", "master", "version"]
+        assert kwargs["timeout"] == 60
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(story_site.subprocess, "run", run)
+    with pytest.raises(SystemExit, match="JP Version preflight failed before starting workers"):
+        story_site.cmd_build(str(tmp_path / "site"), ["10946", "10947"])
+    assert len(calls) == 1
+    assert not (tmp_path / "site.build.json").exists()
+
+
+@pytest.mark.parametrize("region", ["jp", "hk-tw-mo"])
+def test_build_runs_after_successful_jp_preflight_and_international_needs_none(tmp_path, monkeypatch, region):
+    monkeypatch.setenv("MASTERDATA_REGION", region)
+    monkeypatch.setattr(story_site, "configure_region", lambda: None)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(story_site.subprocess, "run", run)
+    story_site.cmd_build(str(tmp_path / "site"), ["10946"])
+    if region == "jp":
+        assert calls.pop(0)[-2:] == ["master", "version"]
+    assert len(calls) == 2
+    assert "--story" in calls[0] and calls[1][-1] == "--player-only"

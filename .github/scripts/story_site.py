@@ -320,6 +320,15 @@ def cmd_fetch(site_dir: str) -> None:
     print(f"fetched {len(keys)} files ({sum((site / k).stat().st_size for k in keys) / 1e6:.1f} MB) into {site}")
 
 
+def check_jp_api() -> None:
+    print("Checking JP Version access before starting build workers", flush=True)
+    check = subprocess.run([sys.executable, "-m", "nnnotes", "master", "version"],
+                           stdout=subprocess.PIPE, timeout=60)
+    if check.returncode:
+        sys.exit("story_site: JP Version preflight failed before starting workers; "
+                 "the runner must be able to access the JP API to obtain CDN authentication")
+
+
 def cmd_build(site_dir: str, ids: list[str]) -> None:
     configure_region()
     site = Path(site_dir).resolve()
@@ -328,6 +337,10 @@ def cmd_build(site_dir: str, ids: list[str]) -> None:
     nnnotes = [sys.executable, "-m", "nnnotes", "web", str(site), "--tmp", str(tmp)]
     if env("MASTERDATA_REGION") == "jp":
         nnnotes += ["--story-languages", "ja"]
+        if stories:
+            # A Pool keeps replacing workers whose initializer cannot open the JP catalog. Check the API once
+            # in the parent before any pool starts so a denied runner fails promptly with the original error.
+            check_jp_api()
     status = 0
     if stories:
         cmd = nnnotes + [a for i in stories for a in ("--story", str(i))]
@@ -335,7 +348,8 @@ def cmd_build(site_dir: str, ids: list[str]) -> None:
         if os.environ.get("FORCE") == "true":
             cmd.append("--force")
         print("+ " + " ".join(cmd[1:]), flush=True)
-        status = subprocess.run(cmd, stdout=open(site.parent / f"{site.name}.build.json", "wb")).returncode
+        with open(site.parent / f"{site.name}.build.json", "wb") as report_stream:
+            status = subprocess.run(cmd, stdout=report_stream).returncode
     # The indexes and player files from every manifest present, whatever the build did.
     index = subprocess.run(nnnotes + ["--player-only"], stdout=subprocess.PIPE).returncode
     report = site.parent / f"{site.name}.build.json"
@@ -381,6 +395,9 @@ def main(argv: list[str]) -> None:
     cmd, args = argv[0], argv[1:]
     if cmd == "regions" and not args:
         cmd_regions()
+    elif cmd == "jp-check" and not args:
+        configure_region()
+        check_jp_api()
     elif cmd == "plan" and not args:
         cmd_plan()
     elif cmd == "master" and len(args) == 1:
