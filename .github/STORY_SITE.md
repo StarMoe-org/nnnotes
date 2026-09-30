@@ -35,6 +35,9 @@ never deletes anything from the bucket. Its helper steps are in
      pages from every manifest present, also after a failed build;
      JP first checks `nnnotes master version` before starting workers. A denied API call stops the run promptly;
      it cannot obtain the CDN authentication from the public master snapshot alone;
+     JP also checks episode script addresses against the remote and APK catalogs before starting story workers.
+     An episode whose main script is absent is deferred, listed in the job summary and `site.deferred.json`, and
+     retried on the next run. Missing dependent resources and export errors still fail the build;
    - upload: check each asset with S3 HEAD and upload missing assets or those whose sizes differ, then the new or
      changed manifests and player files, the indexes last.
      Stories that failed have no manifest, so the next run builds them again; their errors are in the job summary.

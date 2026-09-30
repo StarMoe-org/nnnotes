@@ -270,6 +270,7 @@ def test_jp_api_denial_stops_before_any_build_workers(tmp_path, monkeypatch):
 def test_build_runs_after_successful_jp_preflight_and_international_needs_none(tmp_path, monkeypatch, region):
     monkeypatch.setenv("MASTERDATA_REGION", region)
     monkeypatch.setattr(story_site, "configure_region", lambda: None)
+    monkeypatch.setattr(story_site, "check_jp_story_assets", lambda ids: (ids, []))
     calls = []
 
     def run(command, **kwargs):
@@ -282,3 +283,52 @@ def test_build_runs_after_successful_jp_preflight_and_international_needs_none(t
         assert calls.pop(0)[-2:] == ["master", "version"]
     assert len(calls) == 2
     assert "--story" in calls[0] and calls[1][-1] == "--player-only"
+
+
+def test_only_missing_main_episode_scripts_are_deferred():
+    rows = [{"_id": i, "_advEpisodeAsset": f"episode_{i}"} for i in (10946, 11198)]
+    present = {"Adv/Episode/episode_10946/episode_10946", "Adv/Episode/episode_11198/episode_11198-Text"}
+    ready, deferred = story_site.partition_story_assets([11198, 10946], rows, present.__contains__)
+    # A text shard alone is not an episode; a main script remains buildable even without its optional shards.
+    assert ready == [10946]
+    assert deferred == [{"id": 11198, "asset": "Adv/Episode/episode_11198/episode_11198",
+                         "reason": "episode script absent from catalog"}]
+    present.add(deferred[0]["asset"])
+    assert story_site.partition_story_assets([11198, 10946], rows, present.__contains__) == ([11198, 10946], [])
+
+
+def test_unknown_master_row_is_not_treated_as_unpublished_assets():
+    with pytest.raises(KeyError):
+        story_site.partition_story_assets([11198], [], lambda key: False)
+
+
+@pytest.mark.parametrize("ready,build_status", [([], 0), ([10946], 0), ([10946], 1)])
+def test_build_defers_unavailable_assets_and_preserves_export_failures(tmp_path, monkeypatch, ready, build_status):
+    monkeypatch.setenv("MASTERDATA_REGION", "jp")
+    monkeypatch.setenv("FORCE", "false")
+    monkeypatch.setattr(story_site, "configure_region", lambda: None)
+    monkeypatch.setattr(story_site, "check_jp_api", lambda: None)
+    deferred = [{"id": 11198, "asset": "Adv/Episode/episode_11198/episode_11198",
+                 "reason": "episode script absent from catalog"}]
+    monkeypatch.setattr(story_site, "check_jp_story_assets", lambda ids: (ready, deferred))
+    calls, summaries = [], []
+    monkeypatch.setattr(story_site, "summary", summaries.append)
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=build_status if "--story" in command else 0)
+
+    monkeypatch.setattr(story_site.subprocess, "run", run)
+    report = tmp_path / "site.build.json"
+    report.write_text('{"storiesBuilt": [{"id": "old"}]}')
+    if build_status:
+        with pytest.raises(SystemExit, match="nnnotes web exited with 1"):
+            story_site.cmd_build(str(tmp_path / "site"), ["10946", "11198"])
+    else:
+        story_site.cmd_build(str(tmp_path / "site"), ["10946", "11198"])
+    assert len(calls) == (2 if ready else 1)
+    assert report.exists() == bool(ready)
+    assert calls[-1][-1] == "--player-only"
+    assert all("11198" not in command for command in calls)
+    assert json.loads((tmp_path / "site.deferred.json").read_text()) == deferred
+    assert "retry on the next run" in summaries[0] and "11198" in summaries[0]

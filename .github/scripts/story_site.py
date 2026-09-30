@@ -329,6 +329,31 @@ def check_jp_api() -> None:
                  "the runner must be able to access the JP API to obtain CDN authentication")
 
 
+def partition_story_assets(stories: list[int], rows: list[dict], has) -> tuple[list[int], list[dict]]:
+    """Defer only episodes whose main script is absent; other resource/export errors remain build failures."""
+    by_id = {row["_id"]: row for row in rows}
+    ready, deferred = [], []
+    for story in stories:
+        asset = by_id[story]["_advEpisodeAsset"]
+        key = f"Adv/Episode/{asset}/{asset}"
+        if has(key):
+            ready.append(story)
+        else:
+            deferred.append({"id": story, "asset": key, "reason": "episode script absent from catalog"})
+    return ready, deferred
+
+
+def check_jp_story_assets(stories: list[int]) -> tuple[list[int], list[dict]]:
+    from nnnotes.cli import master_dir, open_catalog
+    from nnnotes.config import Config
+
+    cfg = Config.load()
+    # Use the same remote + APK catalog as the exporter; embedded episodes must remain buildable.
+    cat = open_catalog(cfg, bundles=False)
+    rows = json.loads((master_dir(cfg) / "MasterAdv.json").read_bytes())["_allData"]
+    return partition_story_assets(stories, rows, cat.has)
+
+
 def cmd_build(site_dir: str, ids: list[str]) -> None:
     configure_region()
     site = Path(site_dir).resolve()
@@ -341,18 +366,24 @@ def cmd_build(site_dir: str, ids: list[str]) -> None:
             # A Pool keeps replacing workers whose initializer cannot open the JP catalog. Check the API once
             # in the parent before any pool starts so a denied runner fails promptly with the original error.
             check_jp_api()
+            stories, deferred = check_jp_story_assets(stories)
+            (site.parent / f"{site.name}.deferred.json").write_text(json.dumps(deferred, indent=1), encoding="utf-8")
+            if deferred:
+                summary(f"- deferred {len(deferred)} stories: episode script absent from the current catalog; "
+                        "retry on the next run\n" + "\n".join(f"  - {r['id']}: `{r['asset']}`" for r in deferred))
     status = 0
+    report = site.parent / f"{site.name}.build.json"
+    report.unlink(missing_ok=True)
     if stories:
         cmd = nnnotes + [a for i in stories for a in ("--story", str(i))]
         cmd += ["--workers", env("STORY_WORKERS", "2")]
         if os.environ.get("FORCE") == "true":
             cmd.append("--force")
         print("+ " + " ".join(cmd[1:]), flush=True)
-        with open(site.parent / f"{site.name}.build.json", "wb") as report_stream:
+        with report.open("wb") as report_stream:
             status = subprocess.run(cmd, stdout=report_stream).returncode
     # The indexes and player files from every manifest present, whatever the build did.
     index = subprocess.run(nnnotes + ["--player-only"], stdout=subprocess.PIPE).returncode
-    report = site.parent / f"{site.name}.build.json"
     if report.is_file():
         try:
             r = json.loads(report.read_text(encoding="utf-8"))
