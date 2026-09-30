@@ -4,6 +4,7 @@ import csv
 import io
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,3 +92,20 @@ def test_reachable_api_finishes_without_touching_host_network(monkeypatch):
     monkeypatch.setattr(jp_vpngate, "probe", lambda: True)
     monkeypatch.setattr(jp_vpngate.story_site, "configure_region", lambda: pytest.fail("unexpected VPN setup"))
     jp_vpngate.start()
+
+
+def test_root_owned_openvpn_files_can_be_read(monkeypatch, tmp_path):
+    path = tmp_path / "openvpn.log"
+
+    def denied(self, **kwargs):
+        raise PermissionError("root-owned file")
+
+    monkeypatch.setattr(Path, "read_text", denied)
+
+    def run(command, **kwargs):
+        assert command == ["sudo", "cat", "--", str(path)]
+        assert kwargs["check"] and kwargs["timeout"] == 10
+        return SimpleNamespace(stdout="Initialization Sequence Completed\n")
+
+    monkeypatch.setattr(jp_vpngate.subprocess, "run", run)
+    assert jp_vpngate.read_control_file(path) == "Initialization Sequence Completed\n"

@@ -76,10 +76,21 @@ def work_dir():
     return Path(story_site.env("RUNNER_TEMP")) / "nnnotes-jp-vpngate"
 
 
+def read_control_file(path):
+    try:
+        return path.read_text(errors="replace")
+    except FileNotFoundError:
+        return ""
+    except PermissionError:
+        # OpenVPN creates its log/PID files as root with mode 0600.
+        return subprocess.run(["sudo", "cat", "--", str(path)], check=True, stdout=subprocess.PIPE,
+                              text=True, timeout=10).stdout
+
+
 def stop():
     pidfile = work_dir() / "openvpn.pid"
     if pidfile.exists():
-        pid = pidfile.read_text().strip()
+        pid = read_control_file(pidfile).strip()
         if pid.isdecimal() and int(pid) > 1:
             subprocess.run(["sudo", "kill", "--", pid], check=False, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
@@ -135,7 +146,7 @@ def start():
             continue
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            message = log.read_text(errors="replace") if log.exists() else ""
+            message = read_control_file(log)
             if "Initialization Sequence Completed" in message:
                 if probe():
                     print(f"JP Version is reachable through {row['IP']}", flush=True)
@@ -145,6 +156,7 @@ def start():
                 break
             time.sleep(0.5)
         print("Relay did not provide JP Version access; trying the next one", flush=True)
+        print("\n".join(read_control_file(log).splitlines()[-8:]), flush=True)
     stop()
     sys.exit("jp_vpngate: no relay passed the JP Version check")
 
