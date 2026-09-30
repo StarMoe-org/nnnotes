@@ -50,7 +50,7 @@ FORMAT = "nnnotes.music-data/1"
 BUILD_FORMAT = "moenotes.music-data-build/1"
 # This script's own version of a build: bump it when what it builds or publishes changes, so that the next run builds
 # although the master data, the deck model and nnnotes are the same.
-RECIPE = 2
+RECIPE = 3
 FILE, MARKER, JACKETS, ARCHIVE = "music-data.json", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
 SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
@@ -235,9 +235,11 @@ def cmd_build(out: str) -> None:
     o.mkdir(parents=True, exist_ok=True)
     nnnotes = [sys.executable, "-m", "nnnotes"]
     usage = subprocess.run(nnnotes + ["music-data", "--help"], capture_output=True, text=True).stdout
-    if "--decoded-master" not in usage:
-        fail("the installed nnnotes has no `music-data --decoded-master` (sync the fork with upstream)")
-    cmd = nnnotes + ["music-data", "--decoded-master", "--jackets", str(o / "jackets"), "-o", str(o / FILE)]
+    if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine")):
+        fail("the installed nnnotes lacks decoded-master/replay export (sync the fork with upstream)")
+    engine = build_replay_engine(o)
+    cmd = nnnotes + ["music-data", "--decoded-master", "--jackets", str(o / "jackets"),
+                    "--replay-dir", str(o / "replay"), "--replay-engine", str(engine), "-o", str(o / FILE)]
     print("+ " + " ".join(cmd[1:]), flush=True)
     with open(o / "music-data.summary.json", "wb") as f:
         status = subprocess.run(cmd, stdout=f).returncode
@@ -246,6 +248,77 @@ def cmd_build(out: str) -> None:
     r = json.loads((o / "music-data.summary.json").read_text(encoding="utf-8"))
     summary(f"- built: {r.get('songs')} songs, {r.get('charts')} charts, {r.get('jackets')} jackets, deck "
             f"{short(r.get('deck'))}, {r.get('bytes')} bytes, sha256 {short(r.get('sha256'))}")
+
+
+def build_replay_engine(out: Path) -> Path:
+    """Build CLI and web WASM from the same pinned clean model source as nnnotes._deck."""
+    source = Path(env("MUSIC_DATA_DECK_SOURCE")).resolve()
+    pinned = deck_commit()
+    def check_source():
+        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        changed = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=all",
+                                            "--", "Cargo.toml", "Cargo.lock", "src", "wasm/replay"], text=True).strip()
+        if head != pinned or changed:
+            fail("replay model source is dirty or differs from nnnotes' pinned deck commit")
+    check_source()
+    engine = out / "replay-engine-build"
+    engine.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["cargo", "build", "--manifest-path", str(source / "Cargo.toml"),
+                    "--release", "--locked", "-j2", "--bin", "ournotes-deck"], check=True)
+    target = out.parent / "replay-target"
+    subprocess.run(["cargo", "build", "--manifest-path", str(source / "wasm/replay/Cargo.toml"),
+                    "--target-dir", str(target), "--target", "wasm32-unknown-unknown", "--release", "--locked", "-j2"], check=True)
+    subprocess.run(["wasm-bindgen", "--target", "web", "--out-dir", str(engine), "--out-name", "ournotes_replay",
+                    str(target / "wasm32-unknown-unknown/release/ournotes_replay_wasm.wasm")], check=True)
+    check_source()
+    built = {"format": "ournotes.replay-engine/1", "commit": pinned, "workingTreeDirty": False,
+             "jsSha256": sha256((engine / "ournotes_replay.js").read_bytes()),
+             "wasmSha256": sha256((engine / "ournotes_replay_bg.wasm").read_bytes())}
+    (engine / "build.json").write_text(json.dumps(built, indent=2) + "\n", encoding="utf8")
+    return engine
+
+
+def replay_resources(out: Path, doc: dict) -> list[Path]:
+    """Validate every relative runtime artifact before upload, with the manifest last."""
+    pointer = doc.get("replay")
+    if not pointer:
+        return []
+    root = out.resolve()
+    def local(base: Path, url: str) -> Path:
+        if not isinstance(url, str) or not url or any(c in url for c in (":", "\\", "?", "#")) or Path(url).is_absolute():
+            raise ValueError("replay artifact URL must be a relative file path")
+        path = (base / url).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError("replay artifact URL must stay within the output directory")
+        return path
+    manifest_path = local(root, pointer["manifestUrl"])
+    raw = manifest_path.read_bytes()
+    if sha256(raw) != pointer["sha256"]:
+        raise ValueError("replay manifest SHA mismatch")
+    manifest = json.loads(raw)
+    if pointer.get("format") != "nnnotes.replay-manifest/1" or manifest.get("format") != pointer["format"] or not manifest.get("engine"):
+        raise ValueError("replay manifest has no pinned interactive engine")
+    engine = manifest["engine"]
+    if engine.get("requestFormat") != "ournotes.replay/1":
+        raise ValueError("replay engine request format differs from the shared ABI")
+    if engine["model"]["commit"] != doc["provenance"]["deck"]["commit"]:
+        raise ValueError("replay engine and music data name different model commits")
+    paths = []
+    for entry in [manifest["deckData"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"]]:
+        path = local(manifest_path.parent, entry["url"])
+        data = path.read_bytes()
+        if sha256(data) != entry["sha256"] or len(data) != entry["bytes"]:
+            raise ValueError(f"replay artifact SHA/size mismatch: {entry['url']}")
+        paths.append(path)
+    expected_ids = sorted(c["scoreId"] for s in doc["songs"] for c in s["charts"])
+    if sorted(c["scoreId"] for c in manifest["charts"]) != expected_ids or pointer.get("charts") != len(expected_ids):
+        raise ValueError("replay chart IDs/count differ from music data")
+    built = json.loads(local(manifest_path.parent, engine["build"]["url"]).read_bytes())
+    if (built.get("format") != "ournotes.replay-engine/1" or built.get("commit") != engine["model"]["commit"]
+            or built.get("workingTreeDirty") is True or built.get("jsSha256") != engine["js"]["sha256"]
+            or built.get("wasmSha256") != engine["wasm"]["sha256"]):
+        raise ValueError("replay engine build identity is inconsistent or dirty")
+    return paths + [manifest_path]
 
 
 # ---------------------------------------------------------------- the gates
@@ -617,8 +690,8 @@ def gate_aptitude(doc, ctx: Context, g: Gate):
     range and one variant per shape of the chart's missions (or mission 4) in shape order, a band condition shape's
     bandMatch true then false: every [mean, se] two finite numbers with se >= 0 (0 when deterministic), ranges per
     range, tail = score - the ranges' rangeScore and rankBonus, the seeds and the cross seeds by the seed rule, weights
-    and rangeWeights where the plain kind and the chart's rank weights are, the check within its bound. Warnings:
-    variants whose standard error missed the seed rule's target."""
+    and rangeWeights where the plain kind and the chart's rank weights are, the check within its bound. Every
+    variant must meet the seed rule's standard error target, including at the sample cap."""
     deck = doc.get("deck")
     if not isinstance(deck, dict):
         g.fail("deck is null: no Gekisou skill aptitude")
@@ -919,7 +992,7 @@ def gate_aptitude(doc, ctx: Context, g: Gate):
             if not within(c):
                 g.fail(f"{s}: the check is not within its bound")
     if missed:
-        g.warn(f"{len(missed)} variants missed the seed rule's standard error target: {', '.join(missed[:10])}"
+        g.fail(f"{len(missed)} variants missed the seed rule's standard error target: {', '.join(missed[:10])}"
                + (" ..." if len(missed) > 10 else ""))
     g.note = (f"{len(shapes)} shapes; {aptitudes} charts with an aptitude, {nulls} null; {variants} variants, "
               f"{deterministic} deterministic; plain kind {plain}")
@@ -1161,6 +1234,17 @@ def cmd_check(out: str, master: str, page: str) -> None:
                   master=m, snapshot=snapshot, deck_commit=deck_commit(), nnnotes_version=nnnotes.__version__,
                   jackets=o / "jackets", schema=SCHEMA, published=published(FILE), page=Path(page), file=o / FILE)
     report = gates(raw, ctx)
+    replay_gate = {"gate":"replay", "passed":True,"failures":[],"failureCount":0,
+                   "warnings":[],"warningCount":0,"note":""}
+    try:
+        resources = replay_resources(o, json.loads(raw))
+        if not resources:
+            raise ValueError("final music data has no replay manifest")
+        replay_gate["note"] = f"{len(resources)} SHA-bound runtime resources"
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        replay_gate.update(passed=False,failures=[str(error)],failureCount=1)
+        report["passed"] = False
+    report["gates"].append(replay_gate)
     (o / "check.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     summary(report_markdown(report))
     if not report["passed"]:
@@ -1188,7 +1272,8 @@ def cmd_check(out: str, master: str, page: str) -> None:
 
 # ---------------------------------------------------------------- publish
 def upload(b, key: str, src: Path, cache: str) -> None:
-    extra = {"ContentType": story_site.TYPES.get(src.suffix.lower(), "application/octet-stream"),
+    types = {".wasm":"application/wasm", ".js":"text/javascript"}
+    extra = {"ContentType": types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream")),
              "CacheControl": cache}
     b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
 
@@ -1225,6 +1310,10 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     if not report.get("passed") or report.get("sha256") != sha256(raw) or not (o / MARKER).is_file():
         fail("the file has not passed the gates (check.json): nothing is published")
     marker = json.loads((o / MARKER).read_text(encoding="utf-8"))
+    try:
+        runtime = replay_resources(o, json.loads(raw))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        fail(f"replay resources changed after gates: {error}")
     b = bucket()
     if not b.writable and not dry_run:
         fail("publish needs STORY_S3_ACCESS_KEY and STORY_S3_SECRET_KEY")
@@ -1242,6 +1331,7 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     steps = [(JACKETS + j.name, j, JACKET_CACHE, False) for j in new]
     if not archived:
         steps.append((marker["archive"], o / FILE, ARCHIVE_CACHE, True))
+    steps += [(p.relative_to(o.resolve()).as_posix(), p, FILE_CACHE, True) for p in runtime]
     # the file before the marker that names it, the jackets and the archive copy before the file
     steps += [(FILE, o / FILE, FILE_CACHE, True), (MARKER, o / MARKER, FILE_CACHE, True)]
     if dry_run or not publishing():

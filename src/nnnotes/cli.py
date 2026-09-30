@@ -37,7 +37,7 @@ summaries are printed as UTF-8 whatever the console encoding.
                          [--font emoji=<file>]
                          [--region <region> [--region ...] | --all-regions]
     nnnotes music-data --master-files <master download dir> | --apk-master | --decoded-master [--full] [--no-deck]
-                       [--no-bgm] [--jackets DIR] -o out/music-data.json[.gz]
+                       [--no-gekisou-aptitude] [--no-bgm] [--jackets DIR] -o out/music-data.json[.gz]
     nnnotes export -o out/assets [--select group:<group> | key:<prefix> | bundle:<glob> ...] [--layout original,cas]
     nnnotes plan [--select ...] [--json] [--check] [--emit-tasks <dir>]
     nnnotes run-stage <task.json> [...]
@@ -89,6 +89,8 @@ def load_config(args) -> Config:
     overrides = {k: getattr(args, dest, None) for k, (dest, _) in FLAG_SETTINGS.items()}
     cfg = Config.load(getattr(args, "config", None), overrides=overrides,
                       flags={k: flag for k, (_, flag) in FLAG_SETTINGS.items()})
+    if getattr(args, "func", None) is cmd_config_check:
+        return use(cfg)                         # diagnose raw settings before applying runtime defaults
     if cfg.provider() == "jp" and not cfg.has("catalog", "language"):
         cfg = cfg.for_region(cfg.region())
     return use(cfg)
@@ -617,7 +619,7 @@ def cmd_web(args, cfg):
                    if args.web_regions or args.all_regions else None)   # None: the one [catalog] region
         if (stories or models) and regions and len({cfg.provider(r) for r in regions}) > 1:
             raise ConfigError("build JP stories/models in a separate site directory from international releases")
-        if (stories or models) and regions and cfg.provider(regions[0]) == "jp":
+        if (stories or models) and regions:
             cfg = use(cfg.for_region(regions[0]))
         base = {"region": regions[0]} if regions else {}
         unknown = web.unknown_pairs(cfg, args.pair, regions) if args.pair else []
@@ -672,7 +674,10 @@ def cmd_music_data(args, cfg):
         cfg.require_path("paths", "apk")             # the master data files ship in the APK
     apk = _existing(cfg, "paths", "apk")
     try:
-        deck = None if args.no_deck else musicdata.Deck(seeds=args.seeds, workers=args.workers)
+        deck = None if args.no_deck else musicdata.Deck(
+            seeds=args.seeds, workers=args.workers, aptitude=not args.no_gekisou_aptitude,
+            aptitude_max_seeds=args.aptitude_max_seeds, aptitude_cross_seeds=args.aptitude_cross_seeds,
+            require_convergence=not args.allow_unconverged_aptitude)
         if args.apk_master:
             src, region = deckdata.apk_master(apk), deckdata.EMBEDDED
         elif args.decoded_master:                    # decoded elsewhere: no master key
@@ -687,7 +692,7 @@ def cmd_music_data(args, cfg):
                              catalog=deckdata.catalog_info(cat, cli_assets.store_root(args, cfg)),
                              deck=deck, full=args.full,
                              jacket=musicdata.catalog_jacket(cat) if args.jackets else None,
-                             jackets_dir=args.jackets)
+                             jackets_dir=args.jackets, replay_dir=args.replay_dir, replay_engine=args.replay_engine)
     except (deckdata.DeckDataError, musicdata.MusicDataError) as e:
         sys.exit(f"nnnotes: {e}")
     _print_json(r)
@@ -976,8 +981,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seeds measured on a chart with a luck range (default 8)")
     c.add_argument("--workers", type=int, metavar="N",
                    help="threads measuring charts (default: every processor)")
+    c.add_argument("--no-gekisou-aptitude", action="store_true",
+                   help="leave out the charts' Gekisou aptitude (every gekisouAptitude is null)")
+    c.add_argument("--aptitude-max-seeds", type=int, metavar="N",
+                   help="seeds of a Gekisou aptitude variant at most (default: the deck model's, 65536); "
+                        "sampling stops earlier when both score targets converge")
+    c.add_argument("--allow-unconverged-aptitude", action="store_true",
+                   help="diagnostic export only: retain unmet SE flags at the sample cap; final exports reject them")
+    c.add_argument("--aptitude-cross-seeds", type=int, metavar="N",
+                   help="seeds of a Gekisou aptitude variant's cross terms (default: the deck model's, 64)")
     c.add_argument("--no-bgm", action="store_true",
                    help="do not read the BGM cue sheets (every song's bgm.length is null)")
+    c.add_argument("--replay-dir", metavar="DIR",
+                   help="write canonical runtime DeckData, per-chart inputs and replay manifest under the output directory")
+    c.add_argument("--replay-engine", metavar="DIR",
+                   help="copy pinned wasm-bindgen JS/WASM + build.json into --replay-dir")
     c.add_argument("--jackets", metavar="DIR",
                    help="also write every song's jacket as DIR/<jacket>.webp (at most 320 px on the longer side)")
     _out(c, "output file (.json, or .json.gz for gzip)")

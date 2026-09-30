@@ -1,0 +1,150 @@
+# DRAFT: install as .github/workflows/music-data-prebuilt.yml only after review.
+# Copy the prebuilt_publish*.py/mjs helpers into .github/scripts too.
+# Daily music-data.yml is unchanged; this path skips only already completed build.
+name: Music data (validated prebuilt)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Same-repository draft release ID containing the final bundle and .sha256
+        type: string
+        required: true
+      asset_name:
+        description: Final bundle ZIP asset name
+        type: string
+        required: true
+      bundle_sha256:
+        description: Independently verified SHA-256 of the final bundle ZIP
+        type: string
+        required: true
+      dry_run:
+        description: Check and list uploads without writing objects
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: music-data
+  cancel-in-progress: false
+
+env:
+  STORY_S3_ENDPOINT: ${{ vars.STORY_S3_ENDPOINT || 'https://storage.bdon.moe' }}
+  STORY_S3_BUCKET: ${{ vars.STORY_S3_BUCKET || 'moenotes' }}
+  MUSIC_DATA_S3_PREFIX: ${{ vars.MUSIC_DATA_S3_PREFIX || 'music-data' }}
+  MUSIC_DATA_PUBLISH: ${{ vars.MUSIC_DATA_PUBLISH || 'false' }}
+  MASTERDATA_BASE_URL: ${{ vars.MASTERDATA_BASE_URL || 'https://metadata.bdon.moe' }}
+  MASTERDATA_REGION: ${{ vars.MUSIC_DATA_MASTERDATA_REGION || 'hk-tw-mo' }}
+  NNNOTES_CATALOG_REGION: tw
+  NNNOTES_CATALOG_LANGUAGE: zh-Hant
+  WORK: ${{ github.workspace }}/../prebuilt-work
+
+jobs:
+  check-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: publisher
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Check-only dependencies (no Rust extension build)
+        run: python -m pip install boto3 jsonschema pytest
+      - name: Download the hash-anchored same-repository draft asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ASSET_NAME: ${{ inputs.asset_name }}
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+        run: |
+          python publisher/.github/scripts/prebuilt_publish_download.py \
+            --repository "$GITHUB_REPOSITORY" --release-id "$RELEASE_ID" \
+            --asset-name "$ASSET_NAME" --sha256 "$BUNDLE_SHA256" --out "$WORK/final.zip"
+      - name: Validate inventory and extract a fresh output directory
+        id: bundle
+        env:
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+        run: |
+          python publisher/.github/scripts/prebuilt_publish.py unpack \
+            --archive "$WORK/final.zip" --sha256 "$BUNDLE_SHA256" --out "$WORK/bundle"
+      - name: The authentic NN producer source (full history)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.bundle.outputs.producer_repository }}
+          ref: ${{ steps.bundle.outputs.producer_commit }}
+          path: producer
+          fetch-depth: 0
+      - name: Verify authentic producer identity and every runtime resource
+        run: |
+          python publisher/.github/scripts/prebuilt_publish.py verify \
+            --bundle "$WORK/bundle" --producer "$GITHUB_WORKSPACE/producer" \
+            --publisher "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py"
+      - name: Producer's declared runtime dependencies without rebuilding the extension
+        working-directory: producer
+        run: |
+          python - <<'PY'
+          import pathlib, subprocess, sys, tomllib
+          deps = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['dependencies']
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', *deps], check=True)
+          PY
+      - name: The final pinned chart data page
+        env:
+          PLAYER_REPOSITORY: ${{ steps.bundle.outputs.player_repository }}
+          PLAYER_REF: ${{ steps.bundle.outputs.player_commit }}
+        run: publisher/.github/scripts/songs_page.sh "$WORK/page"
+      - name: Gate self-tests (unchanged)
+        env:
+          MUSIC_DATA_PAGE: ${{ env.WORK }}/page/examples/songs
+        working-directory: producer
+        run: python -m pytest -q -p no:cacheprovider "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data.py"
+      - name: Genuine current API master snapshot (unchanged)
+        working-directory: producer
+        run: python "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" master "$WORK/master"
+      - name: Full original gates and runtime inventory (unchanged)
+        env:
+          PYTHONPATH: ${{ github.workspace }}/producer/src
+          PLAYER_REPOSITORY: ${{ steps.bundle.outputs.player_repository }}
+          PLAYER_REF: ${{ steps.bundle.outputs.player_commit }}
+        working-directory: producer
+        run: |
+          python "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" check \
+            "$WORK/bundle/data" "$WORK/master" "$WORK/page/examples/songs"
+      - name: Final consumer modules and actual WASM replay smoke
+        run: |
+          node publisher/.github/scripts/prebuilt_publish_smoke.mjs \
+            "$WORK/page/examples/songs" "$WORK/bundle/data"
+      - name: Pinned standalone songs page before the music-data pointer
+        env:
+          STORY_S3_ACCESS_KEY: ${{ !inputs.dry_run && vars.MUSIC_DATA_PUBLISH == 'true' && secrets.STORY_S3_ACCESS_KEY || '' }}
+          STORY_S3_SECRET_KEY: ${{ !inputs.dry_run && vars.MUSIC_DATA_PUBLISH == 'true' && secrets.STORY_S3_SECRET_KEY || '' }}
+        run: |
+          python publisher/.github/scripts/prebuilt_publish_page.py \
+            --publisher "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" \
+            --page "$WORK/page/examples/songs" --bundle "$WORK/bundle" \
+            ${{ (inputs.dry_run || vars.MUSIC_DATA_PUBLISH != 'true') && '--dry-run' || '' }}
+      - name: Publish with existing object ordering and read-back checks
+        env:
+          STORY_S3_ACCESS_KEY: ${{ !inputs.dry_run && vars.MUSIC_DATA_PUBLISH == 'true' && secrets.STORY_S3_ACCESS_KEY || '' }}
+          STORY_S3_SECRET_KEY: ${{ !inputs.dry_run && vars.MUSIC_DATA_PUBLISH == 'true' && secrets.STORY_S3_SECRET_KEY || '' }}
+        working-directory: producer
+        run: |
+          python "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" publish \
+            "$WORK/bundle/data" ${{ (inputs.dry_run || vars.MUSIC_DATA_PUBLISH != 'true') && '--dry-run' || '' }}
+      - name: Preserve gate reports (not payloads or secrets)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: prebuilt-publish-reports
+          if-no-files-found: warn
+          path: |
+            ${{ env.WORK }}/bundle/prebuilt.json
+            ${{ env.WORK }}/bundle/data/check.json
+            ${{ env.WORK }}/bundle/data/build.json

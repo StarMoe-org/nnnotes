@@ -465,12 +465,12 @@ def test_warnings_do_not_fail(tmp_path):
     assert gate(r, "references")["warnings"] == ["songs without a zh-Hant title: 100002"]
 
 
-def test_aptitude_warnings(tmp_path):
+def test_aptitude_cap_does_not_accept_unmet_target(tmp_path):
     doc = sample()
     var(doc, 0, 0, 1).update(seeds=1024, seTargetMet=False, crossSeeds=64)   # the last batch, not the target
     r = run(tmp_path, doc)
-    assert r["passed"], failures(r)
-    assert gate(r, "aptitude")["warnings"] == [
+    assert not r["passed"]
+    assert gate(r, "aptitude")["failures"] == [
         "1 variants missed the seed rule's standard error target: 30 shape 1"]
     assert gate(r, "aptitude")["note"] == ("4 shapes; 3 charts with an aptitude, 0 null; 8 variants, "
                                            "2 deterministic; plain kind 0")
@@ -707,3 +707,137 @@ def test_publish_needs_passed_gates(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="has not passed the gates"):
         music_data.cmd_publish(str(out))
     assert s3.store == {}
+
+
+def replay_out(out):
+    """Small ABI resources: exercise publication identity/order without game assets."""
+    doc = json.loads((out / music_data.FILE).read_bytes())
+    commit = doc["provenance"]["deck"]["commit"]
+    base = out / "replay"
+    def resource(url, raw):
+        path = base / url
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        return {"url": url, "sha256": music_data.sha256(raw), "bytes": len(raw)}
+    js = resource("engine/ournotes_replay.js", b"export class ReplaySession {}")
+    wasm = resource("engine/ournotes_replay_bg.wasm", b"\0asm\x01\0\0\0")
+    built = resource("engine/build.json", json.dumps({"format": "ournotes.replay-engine/1", "commit": commit,
+                     "jsSha256": js["sha256"], "wasmSha256": wasm["sha256"]}).encode())
+    charts = [{"scoreId": c["scoreId"], **resource(f"charts/{c['scoreId']}.json", b"{}")}
+              for song in doc["songs"] for c in song["charts"]]
+    manifest = {"format": "nnnotes.replay-manifest/1", "deckData": resource("deck-data.json", b"{}"),
+                "charts": charts, "engine": {"model": {"commit": commit}, "requestFormat": "ournotes.replay/1",
+                                                  "js": js, "wasm": wasm, "build": built}}
+    raw_manifest = json.dumps(manifest).encode()
+    resource("manifest.json", raw_manifest)
+    doc["replay"] = {"format": manifest["format"], "manifestUrl": "replay/manifest.json",
+                     "sha256": music_data.sha256(raw_manifest), "charts": len(charts)}
+    raw = json.dumps(doc).encode()
+    (out / music_data.FILE).write_bytes(raw)
+    for file in ("check.json", "build.json"):
+        info = json.loads((out / file).read_bytes())
+        info["sha256"] = music_data.sha256(raw)
+        (out / file).write_text(json.dumps(info))
+    return doc, manifest
+
+
+def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatch):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    doc, _ = replay_out(out)
+    paths = music_data.replay_resources(out, doc)
+    assert paths[-1].name == "manifest.json"
+    music_data.cmd_publish(str(out))
+    keys = [k for k, _, _ in s3.log]
+    runtime = ["music-data/" + p.relative_to(out).as_posix() for p in paths]
+    assert keys[-len(runtime)-2:] == [*runtime, "music-data/music-data.json", "music-data/build.json"]
+    types = {k: mime for k, _, mime in s3.log}
+    assert types["music-data/replay/engine/ournotes_replay_bg.wasm"] == "application/wasm"
+
+
+@pytest.mark.parametrize("changed", ["bytes", "model", "escape", "absolute", "ids", "abi", "dirty"])
+def test_replay_identity_failure_prevents_any_upload(tmp_path, monkeypatch, changed):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    doc, manifest = replay_out(out)
+    if changed == "bytes":
+        (out / "replay/deck-data.json").write_bytes(b"tampered")
+    else:
+        if changed == "model":
+            manifest["engine"]["model"]["commit"] = "other"
+        elif changed == "escape":
+            manifest["deckData"]["url"] = "../../escaped.json"
+        elif changed == "absolute":
+            manifest["deckData"]["url"] = str((out / "replay/deck-data.json").resolve())
+        elif changed == "ids":
+            manifest["charts"][0]["scoreId"] = -1
+        elif changed == "abi":
+            manifest["engine"]["requestFormat"] = "other"
+        elif changed == "dirty":
+            built = out / "replay/engine/build.json"
+            data = json.loads(built.read_bytes())
+            data["workingTreeDirty"] = True
+            raw = json.dumps(data).encode()
+            built.write_bytes(raw)
+            manifest["engine"]["build"].update(sha256=music_data.sha256(raw), bytes=len(raw))
+        raw = json.dumps(manifest).encode()
+        (out / "replay/manifest.json").write_bytes(raw)
+        doc["replay"]["sha256"] = music_data.sha256(raw)
+        raw_doc = json.dumps(doc).encode()
+        (out / music_data.FILE).write_bytes(raw_doc)
+        report = json.loads((out / "check.json").read_bytes())
+        report["sha256"] = music_data.sha256(raw_doc)
+        (out / "check.json").write_text(json.dumps(report))
+    with pytest.raises(SystemExit, match="replay resources changed after gates"):
+        music_data.cmd_publish(str(out))
+    assert not s3.store
+
+
+def test_replay_read_back_failure_stops_before_runtime_pointer(tmp_path, monkeypatch):
+    s3 = FakeS3(corrupt="music-data/replay/engine/ournotes_replay_bg.wasm")
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    replay_out(out)
+    monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
+    with pytest.raises(SystemExit, match="does not serve what was uploaded"):
+        music_data.cmd_publish(str(out))
+    assert "music-data/replay/manifest.json" not in s3.store
+    assert "music-data/music-data.json" not in s3.store
+    assert "music-data/build.json" not in s3.store
+
+
+@pytest.mark.parametrize("change", ["wrong-head", "untracked-source", "changed-during-build", None])
+def test_engine_build_checks_pinned_source_before_and_after_compiling(tmp_path, monkeypatch, change):
+    source, out = tmp_path / "source", tmp_path / "out"
+    source.mkdir()
+    out.mkdir()
+    monkeypatch.setenv("MUSIC_DATA_DECK_SOURCE", str(source))
+    pinned = "a" * 40
+    monkeypatch.setattr(music_data, "deck_commit", lambda: pinned)
+    checks = []
+    builds = []
+    def output(cmd, **kw):
+        if "rev-parse" in cmd:
+            return ("b" * 40 if change == "wrong-head" else pinned) + "\n"
+        checks.append(cmd)
+        return "?? src/untracked.rs\n" if change == "untracked-source" or (
+            change == "changed-during-build" and len(checks) == 2) else ""
+    def run(cmd, **kw):
+        builds.append(cmd)
+        if cmd[0] == "wasm-bindgen":
+            engine = Path(cmd[cmd.index("--out-dir") + 1])
+            (engine / "ournotes_replay.js").write_bytes(b"js")
+            (engine / "ournotes_replay_bg.wasm").write_bytes(b"wasm")
+    monkeypatch.setattr(music_data.subprocess, "check_output", output)
+    monkeypatch.setattr(music_data.subprocess, "run", run)
+    if change:
+        with pytest.raises(SystemExit, match="source is dirty or differs"):
+            music_data.build_replay_engine(out)
+        assert not (out / "replay-engine-build/build.json").exists()
+        assert len(builds) == (3 if change == "changed-during-build" else 0)
+    else:
+        engine = music_data.build_replay_engine(out)
+        identity = json.loads((engine / "build.json").read_bytes())
+        assert identity["commit"] == pinned and identity["workingTreeDirty"] is False
+        assert identity["jsSha256"] == music_data.sha256(b"js")
+        assert identity["wasmSha256"] == music_data.sha256(b"wasm")
+        assert len(checks) == 2 and len(builds) == 3
