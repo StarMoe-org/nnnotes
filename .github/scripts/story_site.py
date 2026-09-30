@@ -5,21 +5,22 @@ the stories it lacks.
     regions               the regions this run builds (GitHub outputs `regions`, a JSON list, and `count`): those of
                           $STORY_REGIONS (default hk-tw-mo) that the repository_dispatch payload names, or
                           $REQUESTED_REGION of a workflow_dispatch (empty / "all": every one), or all on a schedule
-    plan                  the stories to build: MasterAdv ids absent from this site and, for JP, the international
+    plan                  the stories to build: MasterAdv ids absent from this site's index and, for JP, the international
                           site ($STORY_S3_PREFIX_SHARED); $REQUESTED narrows the ids, $FORCE rebuilds requested ids
                           (at most $STORY_LIMIT, in id order); GitHub outputs `stories` (space separated) and `count`
     master OUT            the decoded master data of $MASTERDATA_REGION from moenotes-masterdata-sync (index.json:
                           every table with its SHA-256), for `nnnotes web`
-    fetch SITE            every object of the site except assets/ into SITE (the manifests `nnnotes web` skips and the
-                          indexes it rewrites from), with their SHA-256 in SITE.fetched.json
+    fetch SITE            the public indexes and the manifests they reference into SITE, with their SHA-256 in
+                          SITE.fetched.json; an unpublished site starts empty
     build SITE ID...      `nnnotes web SITE --story ID ...` ($FORCE: --force), then `--player-only`, which rewrites the
                           player files and the indexes from every manifest present even after a failed build
     publish SITE [--dry-run]
-                          the new assets (those the bucket lacks), then every other file that is new or changed since
+                          the new assets (checked by HEAD), then every other file that is new or changed since
                           `fetch`, the indexes (stories.json, models.json, charts.json) last; never deletes
 
 Bucket: $STORY_S3_ENDPOINT, $STORY_S3_BUCKET, $STORY_S3_PREFIX (a key prefix, may be empty), credentials
-$STORY_S3_ACCESS_KEY / $STORY_S3_SECRET_KEY (unset: anonymous, reads only). Objects are stored as nnnotes writes them:
+$STORY_S3_ACCESS_KEY / $STORY_S3_SECRET_KEY (unset: anonymous, reads only). Public indexes list the manifests to fetch;
+S3 listing is not used because the gateway caches different query parameters as one response. Objects are stored as nnnotes writes them:
 a compressed asset (.gz / .br) as it is, without Content-Encoding (the player decodes it).
 """
 from __future__ import annotations
@@ -37,7 +38,6 @@ from pathlib import Path
 
 INDEXES = ("stories.json", "models.json", "charts.json")
 ASSETS = "assets/"
-STORY_MANIFEST = re.compile(r"stories/(\d+)\.json")
 ASSET_CACHE = "public, max-age=31536000, immutable"       # content-addressed: never changes
 OTHER_CACHE = "public, max-age=300"
 TYPES = {".json": "application/json", ".gz": "application/gzip", ".br": "application/octet-stream",
@@ -98,35 +98,34 @@ class Bucket:
         self.name = env("STORY_S3_BUCKET")
         prefix = (os.environ.get("STORY_S3_PREFIX", "") if prefix is None else prefix).strip("/")
         self.prefix = f"{prefix}/" if prefix else ""
-        # A root site's fetch/publish must not include the JP subsite (including its assets).
-        jp_prefix = env("STORY_S3_PREFIX_JP", "jp").strip("/") + "/"
-        self.exclude = (jp_prefix[len(self.prefix):]
-                        if jp_prefix != self.prefix and jp_prefix.startswith(self.prefix) else None)
 
-    def keys(self, sub: str = "") -> dict[str, int]:
-        """{site path: size} of the objects under `sub` (a site path prefix)."""
-        out = {}
-        for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.name, Prefix=self.prefix + sub):
-            for o in page.get("Contents", []):
-                path = o["Key"][len(self.prefix):]
-                if not self.exclude or not path.startswith(self.exclude):
-                    out[path] = o["Size"]
-        return out
-
-    def download(self, path: str, dest: Path) -> None:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        self.s3.download_file(self.name, self.prefix + path, str(dest))
+    def read(self, path: str, *, missing_ok: bool = False) -> bytes | None:
+        """Read one public object by its path; indexes may be absent on a new site."""
+        url = f"{env('STORY_S3_ENDPOINT').rstrip('/')}/{self.name}/{self.prefix}{path}"
+        try:
+            return get(url, 300)
+        except urllib.error.HTTPError as error:
+            if missing_ok and error.code == 404:
+                return None
+            raise RuntimeError(f"story_site: cannot fetch {url}: HTTP {error.code}") from error
 
     def published_story_ids(self) -> set[int]:
         """Stories advertised to the player, over public HTTP (anonymous S3 listings can be empty)."""
-        url = f"{env('STORY_S3_ENDPOINT').rstrip('/')}/{self.name}/{self.prefix}stories.json"
-        try:
-            index = json.loads(get(url, 60))
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                return set()   # a site that has not been published yet
-            raise
+        data = self.read("stories.json", missing_ok=True)
+        if data is None:
+            return set()
+        index = json.loads(data)
         return {entry["advId"] for entry in index["stories"]}
+
+    def object_size(self, path: str) -> int | None:
+        """HEAD has an object-specific URL; bucket listings are cached without their query parameters."""
+        from botocore.exceptions import ClientError
+        try:
+            return self.s3.head_object(Bucket=self.name, Key=self.prefix + path)["ContentLength"]
+        except ClientError as error:
+            if error.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+                return None
+            raise
 
     def upload(self, path: str, src: Path) -> None:
         suffix = Path(path).suffix.lower()
@@ -258,7 +257,7 @@ def cmd_plan() -> None:
     if hashlib.sha256(data).hexdigest() != region["files"]["MasterAdv.json"]:
         sys.exit("story_site: MasterAdv.json: SHA-256 differs from index.json (run again)")
     stories = sorted(row["_id"] for row in json.loads(data)["_allData"])   # nnnotes storysite.all_stories
-    have = {int(m.group(1)) for k in Bucket().keys("stories/") if (m := STORY_MANIFEST.fullmatch(k))}
+    have = Bucket().published_story_ids()
     shared = set()
     if env("MASTERDATA_REGION") == "jp":
         shared = Bucket(prefix=os.environ.get("STORY_S3_PREFIX_SHARED", "")).published_story_ids()
@@ -290,18 +289,32 @@ def fetched_file(site: Path) -> Path:
 
 def cmd_fetch(site_dir: str) -> None:
     site, bucket = Path(site_dir), Bucket()
-    keys = [k for k in bucket.keys() if not k.startswith(ASSETS) and not k.endswith("/")]
-    endpoint = env("STORY_S3_ENDPOINT").rstrip("/")
-
-    # The bucket serves public read + list, so the fetch is plain HTTP like the player's, not a signed S3
-    # call: Cloudflare's edge intermittently returned SignatureDoesNotMatch on signed ranged downloads.
+    site.mkdir(parents=True, exist_ok=True)
+    indexes, manifests = [], set()
+    # Follow the same indexes as the player. This also keeps JP out of the international fetch; cached S3 lists
+    # at the bucket URL ignore Prefix/continuation-token and can return another region's objects.
+    for name in INDEXES:
+        data = bucket.read(name, missing_ok=True)
+        if data is None:
+            continue
+        index = json.loads(data)
+        for entry in index[name.removesuffix(".json")]:
+            path = entry["manifest"]
+            parts = path.split("/")
+            if (parts[0] != name.removesuffix(".json") or not path.endswith(".json")
+                    or any(p in ("", ".", "..") or "\\" in p or ":" in p for p in parts)):
+                sys.exit(f"story_site: unexpected manifest path {path!r} in {name}")
+            manifests.add(path)
+        (site / name).write_bytes(data)
+        indexes.append(name)
     def fetch(key: str) -> None:
         dest = site / key
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(get(f"{endpoint}/{env('STORY_S3_BUCKET')}/{bucket.prefix}{key}", timeout=300))
+        dest.write_bytes(bucket.read(key))
 
-    parallel(fetch, keys)
+    parallel(fetch, sorted(manifests))
     (site / "assets").mkdir(parents=True, exist_ok=True)
+    keys = indexes + sorted(manifests)
     digests = {k: sha256(site / k) for k in keys}
     fetched_file(site).write_text(json.dumps(digests, indent=1, sort_keys=True), encoding="utf-8")
     print(f"fetched {len(keys)} files ({sum((site / k).stat().st_size for k in keys) / 1e6:.1f} MB) into {site}")
@@ -345,7 +358,8 @@ def cmd_publish(site_dir: str, dry_run: bool = False) -> None:
     before = json.loads(fetched_file(site).read_text(encoding="utf-8"))
     local = sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.is_file())
     assets = [k for k in local if k.startswith(ASSETS)]
-    have = bucket.keys(ASSETS)
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        have = dict(zip(assets, executor.map(bucket.object_size, assets)))
     new_assets = [k for k in assets if have.get(k) != (site / k).stat().st_size]
     changed = [k for k in local if not k.startswith(ASSETS) and before.get(k) != sha256(site / k)]
     last = [k for k in changed if k in INDEXES]

@@ -69,7 +69,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv pip install --system --quiet boto3 pytest
-      - name: Test story planning and site isolation
+      - name: Test story planning, fetching and publishing
         run: python -m pytest -q -p no:cacheprovider .github/scripts/test_story_workflow.py
       - name: Stories to build
         id: plan

@@ -1,4 +1,4 @@
-"""Story workflow planning: reuse international advIds and keep nested sites out of bucket listings."""
+"""Story workflow: reuse international advIds and fetch/publish through object URLs instead of cached listings."""
 import hashlib
 import json
 import sys
@@ -30,11 +30,6 @@ def plan(monkeypatch):
             def __init__(self, prefix=None):
                 self.prefix = story_site.env("STORY_S3_PREFIX", "") if prefix is None else prefix
                 prefixes.append(self.prefix)
-
-            def keys(self, sub):
-                assert sub == "stories/"
-                ids = self.published_story_ids()
-                return {f"stories/{i}.json": 100 for i in ids} | {"stories/readme.txt": 20}
 
             def published_story_ids(self):
                 ids = published[self.prefix]
@@ -106,27 +101,21 @@ def test_international_plan_does_not_use_jp(plan, monkeypatch):
     assert "reused" not in result.summary
 
 
-@pytest.mark.parametrize("prefix,jp_prefix,keys,expected", [
-    ("", "jp", ["stories/10000.json", "jp/stories/10946.json", "jp/assets/a.gz"], ["stories/10000.json"]),
-    ("jp", "jp", ["jp/stories/10946.json", "jp/assets/a.gz"], ["stories/10946.json", "assets/a.gz"]),
-    ("site", "site/japan", ["site/stories/10000.json", "site/japan/models/a.json"], ["stories/10000.json"]),
-    ("international", "japan", ["international/stories/10000.json"], ["stories/10000.json"]),
-])
-def test_bucket_listing_excludes_nested_site(monkeypatch, prefix, jp_prefix, keys, expected):
+@pytest.mark.parametrize("prefix", ["", "jp", "/international/"])
+def test_asset_size_uses_head_on_its_own_site(monkeypatch, prefix):
     import boto3
 
     monkeypatch.setenv("STORY_S3_ENDPOINT", "https://storage.example")
     monkeypatch.setenv("STORY_S3_BUCKET", "stories")
     monkeypatch.setenv("STORY_S3_PREFIX", "unused")
-    monkeypatch.setenv("STORY_S3_PREFIX_JP", jp_prefix)
+    def head_object(**kwargs):
+        normalized = prefix.strip("/")
+        assert kwargs == {"Bucket": "stories", "Key": (normalized + "/" if normalized else "") + "assets/a.gz"}
+        return {"ContentLength": 100}
 
-    def paginate(**kwargs):
-        assert kwargs == {"Bucket": "stories", "Prefix": prefix + "/" if prefix else ""}
-        return [{"Contents": [{"Key": k, "Size": 100} for k in keys]}]
-
-    client = SimpleNamespace(get_paginator=lambda name: SimpleNamespace(paginate=paginate))
+    client = SimpleNamespace(head_object=head_object)
     monkeypatch.setattr(boto3, "client", lambda *args, **kwargs: client)
-    assert list(story_site.Bucket(prefix=prefix).keys()) == expected
+    assert story_site.Bucket(prefix=prefix).object_size("assets/a.gz") == 100
 
 
 def test_shared_story_ids_use_public_index_and_custom_prefix(monkeypatch):
@@ -155,5 +144,105 @@ def test_unpublished_index_is_empty_but_other_http_errors_stop_plan(monkeypatch,
     if status == 404:
         assert bucket.published_story_ids() == set()
     else:
-        with pytest.raises(story_site.urllib.error.HTTPError):
+        with pytest.raises(RuntimeError, match=f"stories.json: HTTP {status}"):
             bucket.published_story_ids()
+
+
+@pytest.mark.parametrize("code", ["404", "NoSuchKey", "AccessDenied", "InternalError"])
+def test_head_treats_only_missing_objects_as_absent(monkeypatch, code):
+    from botocore.exceptions import ClientError
+
+    bucket = story_site.Bucket.__new__(story_site.Bucket)
+    bucket.name, bucket.prefix = "stories", "jp/"
+
+    def head_object(**kwargs):
+        raise ClientError({"Error": {"Code": code}}, "HeadObject")
+
+    bucket.s3 = SimpleNamespace(head_object=head_object)
+    if code in ("404", "NoSuchKey"):
+        assert bucket.object_size("assets/a.gz") is None
+    else:
+        with pytest.raises(ClientError):
+            bucket.object_size("assets/a.gz")
+
+
+@pytest.fixture
+def public_site(monkeypatch):
+    objects, reads = {}, []
+
+    class Bucket:
+        def read(self, path, *, missing_ok=False):
+            reads.append(path)
+            if path not in objects and not missing_ok:
+                raise RuntimeError(f"cannot fetch {path}: HTTP 404")
+            return objects.get(path)
+
+    monkeypatch.setattr(story_site, "Bucket", Bucket)
+    return objects, reads
+
+
+def test_new_site_fetch_starts_empty(tmp_path, public_site):
+    site = tmp_path / "work" / "site"
+    story_site.cmd_fetch(str(site))
+    assert (site / "assets").is_dir()
+    assert json.loads(story_site.fetched_file(site).read_text()) == {}
+    assert public_site[1] == list(story_site.INDEXES)
+
+
+def test_fetch_follows_all_three_indexes_and_leaves_assets_remote(tmp_path, public_site):
+    objects, reads = public_site
+    for kind, manifest in [("stories", "stories/10946.json"), ("models", "models/a.json"),
+                           ("charts", "charts/tw/1_expert.json")]:
+        objects[f"{kind}.json"] = json.dumps({kind: [{"manifest": manifest}]}).encode()
+        objects[manifest] = b'{"files": {"example": {"asset": "assets/a.gz"}}}'
+    site = tmp_path / "site"
+    story_site.cmd_fetch(str(site))
+    before = json.loads(story_site.fetched_file(site).read_text())
+    assert set(before) == set(objects)
+    assert set(reads) == set(objects)
+    assert all(before[path] == hashlib.sha256(data).hexdigest() for path, data in objects.items())
+    assert not list((site / "assets").iterdir())
+
+
+@pytest.mark.parametrize("manifest", ["jp/stories/10946.json", "../stories/a.json", "stories/../a.json",
+                                      "stories/a\\b.json", "https://example/story.json"])
+def test_fetch_rejects_manifest_outside_its_index_directory(tmp_path, public_site, manifest):
+    public_site[0]["stories.json"] = json.dumps({"stories": [{"manifest": manifest}]}).encode()
+    with pytest.raises(SystemExit, match="unexpected manifest path"):
+        story_site.cmd_fetch(str(tmp_path / "site"))
+
+
+def test_fetch_does_not_ignore_missing_advertised_manifest(tmp_path, public_site):
+    public_site[0]["stories.json"] = b'{"stories": [{"manifest": "stories/10946.json"}]}'
+    site = tmp_path / "site"
+    with pytest.raises(RuntimeError, match="stories/10946.json: HTTP 404"):
+        story_site.cmd_fetch(str(site))
+    assert not story_site.fetched_file(site).exists()
+
+
+def test_publish_skips_existing_assets_and_uploads_indexes_last(tmp_path, monkeypatch):
+    site = tmp_path / "site"
+    files = {"assets/existing.gz": b"same", "assets/new.gz": b"new", "assets/changed.gz": b"longer",
+             "stories/10946.json": b"story", "stories.json": b"index", "models/a.json": b"unchanged"}
+    for path, data in files.items():
+        dest = site / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    story_site.fetched_file(site).write_text(json.dumps({"models/a.json": story_site.sha256(site / "models/a.json")}))
+    uploaded, checked = [], []
+
+    class Bucket:
+        writable = True
+
+        def object_size(self, path):
+            checked.append(path)
+            return {"assets/existing.gz": 4, "assets/changed.gz": 2}.get(path)
+
+        def upload(self, path, src):
+            uploaded.append(path)
+
+    monkeypatch.setattr(story_site, "Bucket", Bucket)
+    story_site.cmd_publish(str(site))
+    assert set(checked) == {"assets/existing.gz", "assets/new.gz", "assets/changed.gz"}
+    assert set(uploaded[:2]) == {"assets/new.gz", "assets/changed.gz"}
+    assert uploaded[2:] == ["stories/10946.json", "stories.json"]
