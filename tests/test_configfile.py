@@ -73,7 +73,8 @@ def test_init_with_values(tmp_path, capsys):
     data = tomllib.loads(f.read_text(encoding="utf-8"))
     assert data["bundle"]["key"] == KEY and data["catalog"]["region"] == "en"
     assert data["servers"] == {"en": {"name": "", "cdn": "https://cdn.test/", "api": "", "languages": ["en", "ja"],
-                                      "master": ""}}                  # the example region table renamed
+                                      "master": "", "provider": "", "client_version": "", "apk": "",
+                                      "catalog": ""}}                  # the example region table renamed
     assert data["paths"]["cache"] == str((tmp_path / "cache").absolute())
     assert "# CDN base URL of the region" in f.read_text(encoding="utf-8")         # the comments stay
     if os.name != "nt":
@@ -177,6 +178,30 @@ def test_edit_refuses_what_it_cannot_edit():
         configfile.edit(text, [("servers.tw", "languages", ["en"])], "f")
     with pytest.raises(ConfigError, match="edit the file itself"):
         configfile.edit('[paths]\nfonts.ja = "a"\n', [("paths.fonts", "ja", "b")], "f")
+
+
+@pytest.mark.parametrize("provider", ['"jpp"', '42'])
+def test_check_reports_invalid_provider_as_json(tmp_path, capsys, provider):
+    conf = tmp_path / "nnnotes.toml"
+    conf.write_text(f'[catalog]\nregion="jp"\n[servers.jp]\nprovider={provider}\n', encoding="utf-8")
+    code, out, err = run(["--config", str(conf), "config", "check", "--json"], capsys)
+    assert code == 1 and not err
+    report = json.loads(out)
+    assert report["problems"] == 1
+    item = next(s for s in report["settings"] if s["name"] == "servers.jp.provider")
+    assert item["status"] == "invalid"
+
+
+def test_check_does_not_turn_jp_language_defaults_into_flags(tmp_path, capsys):
+    conf = tmp_path / "nnnotes.toml"
+    conf.write_text('[catalog]\nregion="jp"\n[servers.jp]\nprovider="jp"\n', encoding="utf-8")
+    code, out, _ = run(["--config", str(conf), "config", "check", "--json"], capsys)
+    assert code == 0
+    settings = {s["name"]: s for s in json.loads(out)["settings"]}
+    assert settings["catalog.region"]["origin"] == "file"
+    assert settings["catalog.language"]["status"] == "unset"
+    cfg = cli.load_config(cli.build_parser().parse_args(["--config", str(conf), "master", "version"]))
+    assert cfg.require("catalog", "language") == "ja"  # normal commands still apply the JP default
 
 
 def test_check_reports_states_not_values(tmp_path, capsys, monkeypatch):
