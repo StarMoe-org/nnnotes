@@ -24,7 +24,8 @@ on:
         default: true
 
 permissions:
-  contents: read
+  # GitHub restricts private draft-release downloads to callers with push access.
+  contents: write
 
 concurrency:
   group: music-data
@@ -39,7 +40,7 @@ env:
   MASTERDATA_REGION: ${{ vars.MUSIC_DATA_MASTERDATA_REGION || 'hk-tw-mo' }}
   NNNOTES_CATALOG_REGION: tw
   NNNOTES_CATALOG_LANGUAGE: zh-Hant
-  WORK: ${{ github.workspace }}/../prebuilt-work
+  WORK: ${{ github.workspace }}/prebuilt-work
 
 jobs:
   check-and-publish:
