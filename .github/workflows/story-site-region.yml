@@ -44,8 +44,8 @@ env:
   APK_PACKAGE: ${{ inputs.region == 'jp' && 'com.bushiroad.sirius' || vars.STORY_APK_PACKAGE || 'com.bilibili.sirius' }}
   PYTHON_VERSION: "3.13"
   WORK: ${{ github.workspace }}/../work
-  # nnnotes settings (docs/configuration.md); the keys and the CDN come from secrets in the build step, JP's API/CDN/
-  # client version from its public master snapshot (story_site.py configure_region).
+  # nnnotes settings (docs/configuration.md); keys come from secrets. Catalog versions and CDN roots come from
+  # the saved public master snapshot (story_site.py configure_region); JP also reads API/client version there.
   NNNOTES_CATALOG_REGION: ${{ inputs.region == 'jp' && 'jp' || 'tw' }}
   NNNOTES_CATALOG_LANGUAGE: ${{ inputs.region == 'jp' && 'ja' || 'zh-Hant' }}
   NNNOTES_SERVERS_JP_NAME: JP
@@ -155,7 +155,6 @@ jobs:
         env:
           NNNOTES_BUNDLE_KEY: ${{ secrets.NNNOTES_BUNDLE_KEY }}
           NNNOTES_BUNDLE_NONCE_SEED: ${{ secrets.NNNOTES_BUNDLE_NONCE_SEED }}
-          NNNOTES_SERVERS_TW_CDN: ${{ secrets.NNNOTES_SERVERS_TW_CDN }}
           NNNOTES_PATHS_CACHE: ${{ env.WORK }}/cache
           NNNOTES_PATHS_MASTER: ${{ env.WORK }}/master
           NNNOTES_PATHS_APK: ${{ env.WORK }}/apk/base.apk

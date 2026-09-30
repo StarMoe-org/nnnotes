@@ -50,7 +50,7 @@ FORMAT = "nnnotes.music-data/1"
 BUILD_FORMAT = "moenotes.music-data-build/1"
 # This script's own version of a build: bump it when what it builds or publishes changes, so that the next run builds
 # although the master data, the deck model and nnnotes are the same.
-RECIPE = 3
+RECIPE = 4
 FILE, MARKER, JACKETS, ARCHIVE = "music-data.json", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
 SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
@@ -59,7 +59,8 @@ SMOKE = Path(__file__).resolve().parent / "music_data_smoke.mjs"
 ARCHIVE_CACHE = story_site.ASSET_CACHE              # archive/<version>/<sha256>.json: content-addressed
 FILE_CACHE = "no-cache"                             # music-data.json and build.json change in place
 JACKET_CACHE = "public, max-age=86400"
-SNAPSHOT_KEYS = ("version", "resource_version", "resource_hash", "client_version", "verified_at", "manifest_sha256", "table_count")
+SNAPSHOT_KEYS = ("version", "resource_version", "resource_hash", "client_version", "verified_at", "manifest_sha256", "table_count",
+                 "server", "upstream", "assets")
 
 # the gates' bounds (MUSIC_DATA.md)
 SIZE_RATIO = (0.8, 2.0)                             # against the published file
@@ -204,7 +205,7 @@ def cmd_plan() -> None:
 
 # ---------------------------------------------------------------- master data
 def snapshot_file(master: Path) -> Path:
-    return master.parent / f"{master.name}.snapshot.json"
+    return story_site.snapshot_file(master)
 
 
 def cmd_master(out: str) -> None:
@@ -217,6 +218,7 @@ def cmd_master(out: str) -> None:
         fail(f"index.json: the entry's manifest_sha256 is not the SHA-256 of its {MANIFEST}")
     d = Path(out)
     d.mkdir(parents=True, exist_ok=True)
+    snapshot_file(d).unlink(missing_ok=True)
     story_site.parallel(lambda item: story_site.fetch_table(url, item[0], item[1], d / item[0]), files.items(), 8)
     version = json.loads((d / MANIFEST).read_bytes()).get("version")
     if entry.get("version") is not None and str(version) != str(entry["version"]):

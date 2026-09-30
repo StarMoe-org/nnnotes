@@ -56,7 +56,7 @@ env:
   APK_PACKAGE: ${{ vars.MUSIC_DATA_MASTERDATA_REGION == 'jp' && 'com.bushiroad.sirius' || vars.STORY_APK_PACKAGE || 'com.bilibili.sirius' }}
   PYTHON_VERSION: "3.13"
   WORK: ${{ github.workspace }}/../work
-  # nnnotes settings (docs/configuration.md); the bundle key and the CDN come from secrets in the build step.
+  # Bundle keys come from secrets; catalog versions and CDN roots come from the saved master snapshot.
   NNNOTES_CATALOG_REGION: ${{ vars.MUSIC_DATA_MASTERDATA_REGION == 'jp' && 'jp' || 'tw' }}
   NNNOTES_CATALOG_LANGUAGE: ${{ vars.MUSIC_DATA_MASTERDATA_REGION == 'jp' && 'ja' || 'zh-Hant' }}
   NNNOTES_SERVERS_JP_NAME: JP
@@ -147,7 +147,6 @@ jobs:
           MUSIC_DATA_DECK_SOURCE: ${{ github.workspace }}/pinned-replay-model
           NNNOTES_BUNDLE_KEY: ${{ secrets.NNNOTES_BUNDLE_KEY }}
           NNNOTES_BUNDLE_NONCE_SEED: ${{ secrets.NNNOTES_BUNDLE_NONCE_SEED }}
-          NNNOTES_SERVERS_TW_CDN: ${{ secrets.NNNOTES_SERVERS_TW_CDN }}
           # A new cache on every run, never actions/cache: nnnotes keeps a downloaded catalog file for good (a cached
           # one would never see a new resource version), and the cache holds decrypted game files.
           NNNOTES_PATHS_CACHE: ${{ env.WORK }}/cache

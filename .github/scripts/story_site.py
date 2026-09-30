@@ -33,6 +33,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -195,21 +196,87 @@ def cmd_regions() -> None:
     output("count", str(len(regions)))
 
 
+def snapshot_file(master: Path) -> Path:
+    return master.parent / f"{master.name}.snapshot.json"
+
+
+def build_snapshot() -> dict:
+    """Use the snapshot downloaded with the tables, not a newer index observed during the build."""
+    master = os.environ.get("NNNOTES_PATHS_MASTER")
+    if master:
+        path = snapshot_file(Path(master))
+        if not path.is_file():
+            sys.exit("story_site: master snapshot missing; run the master step before building")
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+        if snapshot.get("region") != env("MASTERDATA_REGION"):
+            sys.exit("story_site: saved master snapshot belongs to another region")
+        return snapshot
+    # The JP network preflight runs before the master step, without local tables.
+    return master_index()[1]
+
+
+def configure_international_catalog(entry: dict, region: str) -> None:
+    """Pin one versioned catalog for both asset preflight and all story/Live2D workers."""
+    from nnnotes.addressables import parse
+
+    version = entry.get("resource_version")
+    if (not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", version)
+            or ".." in version):
+        sys.exit("story_site: snapshot lacks a valid resource_version")
+    language = env("NNNOTES_CATALOG_LANGUAGE")
+    if not re.fullmatch(r"[A-Za-z0-9-]+", language):
+        sys.exit("story_site: invalid catalog language")
+    combined = (entry.get("server") or {}).get("cdnRoot")
+    roots = list(dict.fromkeys(r.strip().rstrip("/") for r in combined.split("|"))) if isinstance(combined, str) else []
+    if not roots or len(roots) > 4:
+        sys.exit("story_site: snapshot lacks valid server.cdnRoot")
+    for root in roots:
+        u = urlsplit(root)
+        if (u.scheme != "https" or not u.hostname or u.username is not None or u.password is not None
+                or u.query or u.fragment or any(c in root for c in "\\%?#")
+                or any(part in (".", "..") for part in u.path.split("/"))):
+            sys.exit("story_site: snapshot has invalid server.cdnRoot")
+    filename = f"catalog_{version}_{language}.bin"
+    for root in roots:
+        try:
+            data = get(root + "/asset/Android/" + filename)
+            # A bad/missing versioned catalog must fail before absent assets can be deferred.
+            parse(data)
+        except (OSError, ValueError, RuntimeError) as error:
+            print(f"story_site: {filename} mirror failed ({type(error).__name__}); checking remaining mirrors", flush=True)
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        cache = Path(env("NNNOTES_PATHS_CACHE")).resolve()
+        target = cache / "catalogs" / region / hashlib.sha256(root.encode()).hexdigest()[:16] / version / digest / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_bytes(data)
+        temporary.replace(target)
+        # Regional paths take precedence over paths.catalog. Children inherit both the
+        # selected mirror and this exact local file, bypassing catalog_main's old cache.
+        prefix = "NNNOTES_SERVERS_" + region.upper()
+        os.environ[prefix + "_CDN"] = root
+        os.environ[prefix + "_CATALOG"] = str(target)
+        summary(f"- catalog: {region}/{language}, resource_version {version}, sha256 {digest}")
+        return
+    sys.exit(f"story_site: could not load {filename} from the snapshot's CDN roots; refusing catalog_main fallback")
+
+
 def configure_region() -> None:
-    """Keep build inputs from one release; JP client/API/CDN are read from the public snapshot."""
+    """Keep catalog and endpoint selection tied to the downloaded public master snapshot."""
     region = env("MASTERDATA_REGION")
     names = {"hk-tw-mo": "tw", "en": "en", "kr": "kr", "jp": "jp"}
     if region not in names or env("NNNOTES_CATALOG_REGION") != names[region]:
         sys.exit("story_site: master region and catalog region differ")
-    if region != "jp":
-        return
-    _, snapshot = master_index()
+    snapshot = build_snapshot()
     entry = snapshot.get("entry") or {}
+    if region != "jp":
+        configure_international_catalog(entry, names[region])
+        return
     assets = entry.get("assets") or {}
     upstream = entry.get("upstream") or {}
     api = assets.get("api_root") or upstream.get("api_root")
     bundle = assets.get("bundle_root")
-    from urllib.parse import urlsplit
     cdn = upstream.get("cdn_root")
     if bundle:
         u = urlsplit(bundle)
@@ -236,7 +303,10 @@ def cmd_master(out: str) -> None:
     url, region = master_index()
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_file(out_dir).unlink(missing_ok=True)
     parallel(lambda item: fetch_table(url, item[0], item[1], out_dir / item[0]), region["files"].items(), 8)
+    snapshot = {"region": env("MASTERDATA_REGION"), "entry": region.get("entry") or {}, "files": region["files"]}
+    snapshot_file(out_dir).write_text(json.dumps(snapshot, indent=1, sort_keys=True), encoding="utf-8")
     print(f"master data: {len(region['files'])} tables into {out_dir}")
 
 

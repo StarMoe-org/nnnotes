@@ -65,7 +65,6 @@ Repository secrets (Settings → Secrets and variables → Actions → Secrets):
 |---|---|
 | `NNNOTES_BUNDLE_KEY` | `[bundle] key` (32 hex digits) |
 | `NNNOTES_BUNDLE_NONCE_SEED` | `[bundle] nonce_seed` |
-| `NNNOTES_SERVERS_TW_CDN` | `[servers.tw] cdn`: the TW CDN base URL |
 | `PLAYFETCH_CREDENTIALS` | the whole `credentials.json` of `playfetch login` (the account that can pull `com.bilibili.sirius`) |
 | `STORY_S3_ACCESS_KEY`, `STORY_S3_SECRET_KEY` | an S3 key that can list, read and write the bucket |
 
@@ -77,6 +76,17 @@ Repository variables (optional; the defaults are the StarMoe site): `STORY_S3_EN
 
 ## Notes
 
+- **Catalog version.** The master step saves its region entry beside the downloaded tables as
+  `master.snapshot.json`. International builds use that entry's `resource_version` and `server.cdnRoot` to fetch
+  `catalog_<resource_version>_<language>.bin`; roots separated by `|` are tried in order with their complete path
+  prefixes. `catalog_main` can remain an old release even while new master data is available. The catalog is
+  parsed before story availability checks and pinned in a region/origin/version/SHA256 path. The selected file
+  and mirror are passed to all story and Live2D workers. Missing or corrupt versioned catalogs stop the build;
+  they never silently fall back to main or turn a download failure into deferred stories. The old TW CDN secret
+  is no longer used by these workflows. JP keeps its existing version/hash catalog and authentication behavior.
+- **Missing stories and models.** Stories previously deferred because main lacked their scripts are reconsidered
+  by the next run against the versioned catalog. Their referenced Live2D models use that same catalog. This
+  workflow builds models used by the selected stories; it does not independently rebuild every existing model.
 - **JP network.** The Linux build runner first checks anonymous Version directly. When that is refused, it fetches
   VPNGate's public CSV list and tries up to six Japanese OpenVPN relays in score order. Only the resolved JP API/CDN
   IPv4 addresses get VPN host routes; the names are pinned for that run. A relay is accepted only after Version

@@ -11,6 +11,7 @@ import music_data
 
 
 def test_configure_jp_from_public_snapshot(monkeypatch):
+    monkeypatch.delenv('NNNOTES_PATHS_MASTER', raising=False)
     monkeypatch.setenv('MASTERDATA_REGION', 'jp')
     monkeypatch.setenv('NNNOTES_CATALOG_REGION', 'jp')
     entry = {'client_version': '1.0.4', 'assets': {'api_root': 'https://api.example.test',

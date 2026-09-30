@@ -4,6 +4,12 @@ JP: `MUSIC_DATA_MASTERDATA_REGION=jp` selects the JP package, catalog and client
 `jp/music-data` as the default output prefix. The marker includes the asset hash and the provenance gate rejects
 a catalog from another snapshot. See [Japanese release](../docs/jp.md) for setup and validation limits.
 
+International builds also pin the catalog to the downloaded master snapshot: its `resource_version` selects
+`catalog_<resource_version>_<language>.bin`, and `server.cdnRoot` supplies the mirror roots. The story workflow's
+shared helper validates and passes that exact file to the build, bypassing old `catalog_main` caches. Endpoint
+metadata is saved in `master.snapshot.json` with the table hashes. Recipe 4 causes one rebuild after upgrading
+from the old selector even if the master version is unchanged. No CDN secret is required for this selection.
+
 `.github/workflows/music-data.yml` keeps the music data file of the chart data page (ournotes-player
 `examples/songs`) up to date: `nnnotes music-data` of the current master data ([docs/music-data.md](../docs/music-data.md):
 every song and chart with the deck model's statistics, the play scenarios and the chart's Gekisou skill aptitude),
@@ -115,7 +121,7 @@ separate rollout decision. No browser or page build is needed.
 ## Settings
 
 Repository secrets: the story site's (`.github/STORY_SITE.md`), no new one: `NNNOTES_BUNDLE_KEY`,
-`NNNOTES_BUNDLE_NONCE_SEED`, `NNNOTES_SERVERS_TW_CDN`, `PLAYFETCH_CREDENTIALS`, `STORY_S3_ACCESS_KEY`,
+`NNNOTES_BUNDLE_NONCE_SEED`, `PLAYFETCH_CREDENTIALS`, `STORY_S3_ACCESS_KEY`,
 `STORY_S3_SECRET_KEY`. The master key is not needed: the master data comes decoded.
 
 Repository variables:
