@@ -5,6 +5,7 @@ name: Story site
 # writes) lives in an S3 bucket; a region's run (story-site-region.yml) fetches its manifests (not its assets), builds
 # the missing stories with `nnnotes web --story` on top of them, and uploads what the build added or changed: new
 # assets first, then the story and model manifests, the indexes last. Nothing is deleted from the bucket.
+# JP skips advIds already published by the international site: the player merges both indexes.
 #
 # Triggers: moenotes-masterdata-sync sends repository_dispatch `masterdata-updated` (client_payload.regions) when a
 # region starts serving a new master snapshot: those regions build; a daily schedule catches a missed dispatch (every
@@ -22,7 +23,7 @@ on:
         options: [all, hk-tw-mo, jp]
         default: all
       stories:
-        description: "MasterAdv ids to build, separated by spaces or commas (empty: every story the site lacks)"
+        description: "MasterAdv ids to build, spaces or commas (empty: missing stories; JP reuses international advIds)"
         required: false
         default: ""
       force:
