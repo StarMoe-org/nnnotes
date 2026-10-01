@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -44,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import story_site                                   # noqa: E402  (the bucket, HTTP and master data helpers)
+import http_compression                             # noqa: E402
 from story_site import env, get, output, summary   # noqa: E402
 
 FORMAT = "nnnotes.music-data/1"
@@ -229,6 +231,37 @@ def cmd_regions() -> None:
     output("count", str(len(selected)))
 
 
+def cmd_jp_check() -> None:
+    """Check the actual JP credential path before allocating Rust/WASM build work."""
+    if env("MASTERDATA_REGION") != "jp":
+        fail("JP preflight requires the JP region")
+    story_site.configure_region()
+    from nnnotes.config import Config
+    from nnnotes.jp import Session
+    from nnnotes.gameapi import GameApiError
+    expected = (story_site.build_snapshot().get("entry") or {})
+    report = {"format": "moenotes.jp-preflight/1", "clientVersion": os.environ.get("NNNOTES_SERVERS_JP_CLIENT_VERSION"),
+              "expectedMasterVersion": expected.get("version"), "expectedResourceVersion": expected.get("resource_version"),
+              "expectedResourceHash": expected.get("resource_hash"), "status": "pending"}
+    def preserve():
+        if os.environ.get("WORK"):
+            path = Path(os.environ["WORK"]) / "out/jp-preflight.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    try:
+        observation = Session(Config.load(), "jp").observe(timeout=30)
+    except GameApiError as error:
+        report.update(status="failed", error=str(error)); preserve()
+        fail(f"JP CDN authentication preflight failed: {error}")
+    if (observation.version.version != expected.get("version") or observation.source is None
+            or observation.source.version != expected.get("resource_version")
+            or observation.source.hash != expected.get("resource_hash")):
+        report.update(status="failed", error="current JP assets differ from the decoded source"); preserve()
+        fail("JP Version assets differ from the decoded snapshot; refresh master data before building")
+    report.update(status="success"); preserve()
+    summary("- JP CDN authentication preflight passed for the current decoded snapshot")
+
+
 def short(v) -> str:
     return str(v)[:12] if v is not None else "?"
 
@@ -343,12 +376,15 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
     if not pointer:
         return []
     root = out.resolve()
+    if (not SHA256.fullmatch(str(pointer.get("sha256")))
+            or pointer.get("manifestUrl") != f"replay/{pointer['sha256']}/manifest.json"):
+        raise ValueError("replay manifest must use its immutable SHA directory")
     def local(base: Path, url: str) -> Path:
         if not isinstance(url, str) or not url or any(c in url for c in (":", "\\", "?", "#")) or Path(url).is_absolute():
             raise ValueError("replay artifact URL must be a relative file path")
         path = (base / url).resolve()
-        if not path.is_relative_to(root):
-            raise ValueError("replay artifact URL must stay within the output directory")
+        if not path.is_relative_to(root) or not path.is_relative_to(base.resolve()):
+            raise ValueError("replay artifact URL must stay within its immutable bundle directory")
         return path
     manifest_path = local(root, pointer["manifestUrl"])
     raw = manifest_path.read_bytes()
@@ -1377,23 +1413,38 @@ def upload(b, key: str, src: Path, cache: str) -> None:
     types = {".wasm":"application/wasm", ".js":"text/javascript"}
     extra = {"ContentType": types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream")),
              "CacheControl": cache}
-    b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
+    if src.suffix.lower() == ".json":
+        encoded, transport = http_compression.encode_json(src.read_bytes())
+        b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
+    else:
+        b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
 
 
 def read_back(b, key: str, digest: str) -> None:
-    """The object as stored (S3 GET), else as served (plain HTTP), must have the SHA-256 uploaded."""
+    """Verify stored encoding/metadata and decoded SHA before advancing a public pointer."""
+    compressed_json = key.lower().endswith(".json")
+    try:
+        # This is the consumer's actual response, with the same complete transport contract.
+        # Some signed SDK responses fail this contract; retrying them need not delay a valid public response.
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
+                                       compressed_json=compressed_json)
+        return
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     for attempt in range(4):
         try:
-            if sha256(b.s3.get_object(Bucket=b.name, Key=b.prefix + key)["Body"].read()) == digest:
-                return
+            http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest,
+                                           compressed_json=compressed_json)
+            return
         except Exception as e:                       # Cloudflare in front of the store rejects a signed GET at times
             print(f"read back {key}: {type(e).__name__}", flush=True)
         time.sleep(3 * (attempt + 1))
     try:
-        if sha256(get(public_url(key), timeout=300)) == digest:
-            return
-    except urllib.error.URLError as e:
-        print(f"read back {key} over HTTP: {e}", flush=True)
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
+                                       compressed_json=compressed_json)
+        return
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     fail(f"{key}: the bucket does not serve what was uploaded (SHA-256 {digest[:12]})")
 
 
@@ -1422,16 +1473,23 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     if not b.writable and not dry_run:
         fail("publish needs STORY_S3_ACCESS_KEY and STORY_S3_SECRET_KEY")
     force = os.environ.get("FORCE") == "true"
+    jackets = sorted((o / "jackets").glob("*.webp"))
     try:
-        have = b.keys(JACKETS)
-        archived = b.keys(marker["archive"]).get(marker["archive"]) == len(raw)
+        have = {JACKETS + jacket.name: b.object_size(JACKETS + jacket.name) for jacket in jackets}
+        archived = b.object_size(marker["archive"]) == len(http_compression.encode_json(raw)[0])
     except Exception as e:                           # a dry run without a key where the bucket lists to none
         if not dry_run:
             raise
         print(f"cannot list the bucket ({type(e).__name__}): the dry run lists every object", flush=True)
         have, archived = {}, False
-    jackets = sorted((o / "jackets").glob("*.webp"))
     new = [j for j in jackets if force or have.get(JACKETS + j.name) != j.stat().st_size]
+    if archived and not dry_run and publishing():
+        try:
+            read_back(b, marker["archive"], marker["sha256"])
+        except SystemExit:
+            # An equal stored length is not evidence of identity; restore the checked decoded bytes before pointers.
+            print("existing archive failed identity verification; replacing it from the checked payload", flush=True)
+            archived = False
     steps = [(JACKETS + j.name, j, JACKET_CACHE, False) for j in new]
     if not archived:
         steps.append((marker["archive"], o / FILE, ARCHIVE_CACHE, True))
@@ -1468,6 +1526,8 @@ def main(argv: list[str]) -> None:
     cmd, args = argv[0], argv[1:]
     if cmd == "regions" and not args:
         cmd_regions()
+    elif cmd == "jp-check" and not args:
+        cmd_jp_check()
     elif cmd == "plan" and not args:
         cmd_plan()
     elif cmd == "master" and len(args) == 1:

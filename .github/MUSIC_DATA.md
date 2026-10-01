@@ -28,6 +28,13 @@ published into the story site's bucket under `music-data/` (`https://storage.bdo
 | `jackets/<jacket>.webp` | every song's jacket (`--jackets`), where the page looks for them | `public, max-age=86400` |
 | `archive/<master version>/<sha256>.json` | every published file, kept | `public, max-age=31536000, immutable` |
 | `build.json` | the build marker: the file's SHA-256, size and counts, what it was made from, the gate results, the run | `no-cache` |
+| `replay/<manifest SHA-256>/...` | the SHA-bound deck, 13 Snap label tables, charts and shared engine | versioned directory; never overwrites another manifest's resources |
+
+All JSON is stored with deterministic gzip, `Content-Type: application/json` and `Content-Encoding: gzip` at its
+existing `.json` URL. Manifest SHA-256 and byte counts describe **decoded** bytes. Separate object metadata records
+`decoded-sha256`, `decoded-bytes`, `encoded-sha256` and `encoded-bytes`; read-back verifies both identities and the
+encoding header. JavaScript, WASM and images retain their original bytes and transport. Browsers decompress JSON
+automatically; Python consumers explicitly decode `Content-Encoding` before checking the manifest's SHA.
 
 A run never deletes anything from the bucket. Its helper steps are `.github/scripts/music_data.py` (with the bucket,
 HTTP and master data helpers of `story_site.py`), `music_data_smoke.mjs`, `songs_page.sh` and `apk.sh`; the gate
@@ -50,8 +57,12 @@ saved JP solo thresholds. A subsequent [SHA-verified TW master comparison](lates
 master `74639bc3f98486a22b1232f232213def`: 86 songs, including new song 100109, and changed solo/room thresholds
 for both sentinel songs. The new TW solo values also match the second screenshot. Their song and difficulty
 master rows are unchanged; chart asset bytes were not compared. This verifies source parameter updates, not
-the mechanism of a game bug fix or native score semantics. The correct JP Version query failed with
-`UNAVAILABLE`; no latest JP observation or fresh JP native certification is claimed.
+the mechanism of a game bug fix or native score semantics. An earlier JP Version query failed with `UNAVAILABLE`.
+The subsequent early-preflight [run 36850340038](https://github.com/StarMoe-org/nnnotes/actions/runs/36850340038),
+using client 1.0.4, failed with `PERMISSION_DENIED` before Rust/WASM work. A local read using the same actual APK
+client succeeded; this does not prove that GitHub's runner can authenticate or certify the latest native model.
+No JP publication is claimed from the failed preflight. The installed APK's manifest client version takes precedence
+over a saved snapshot fallback; live authentication and exact master/resource/hash matching remain mandatory.
 
 Rank/reward threshold changes are master **parameters**: the hash identity schedules a refresh and the source
 gate verifies the exported values directly. Client/native **semantics** changes (score, skill conditions,
@@ -87,9 +98,11 @@ extend the existing linear plain-skill UI domain or derive source rank threshold
 
 `music-data.json` is self-contained: its provenance binds region, client, master table hashes, catalog and model.
 Publication is **not a transaction across objects**: if its upload succeeds but its read-back fails, the data file
-can already be new while `build.json` is old. The old archive is retained; no automatic rollback is claimed. The
-mutable replay manifest likewise is not an atomic switch with the data file. A future consumer migration can use
-one final pointer to immutable data/runtime manifests. This PR retains the existing consumer layout. The second
+can already be new while `build.json` is old. The old archive is retained; no automatic rollback is claimed.
+Every replay bundle is written under the decoded manifest SHA-256, and its relative resources must stay within
+that directory. New runtime uploads therefore cannot overwrite the bundle referenced by the old main document.
+The UI-only publisher freezes the build marker, downloads its immutable archive and SHA-bound replay inputs, then
+verifies the marker again. The main document and final build marker still are two separate mutable objects. The second
 source check narrows the race with external source updates; it cannot provide a transaction with the source service.
 
 Triggers: `repository_dispatch` `masterdata-updated` (moenotes-masterdata-sync's `dispatch_repositories` already
@@ -101,9 +114,18 @@ missed, and `workflow_dispatch`:
 | `region` | `all` (default), `hk-tw-mo` or `jp`, intersected with enabled `MUSIC_DATA_REGIONS` |
 | `force` | build and publish although the published file was made from the same inputs; upload every jacket again |
 | `dry_run` | build and check, then list what would be uploaded instead of uploading |
+| `reencode_only` | verify and gzip the currently published snapshot without compiling Rust or recomputing statistics |
 
 Normal and prebuilt writers share `music-data-<region>` concurrency with cancellation disabled. TW and JP have
 separate output prefixes and can proceed independently. Prefix overrides must remain distinct between regions.
+The two dedicated `songs/` page writers also share `songs-page-publication`; prebuilt acquires that global lock
+before its data-region lock. Story publication does not write the dedicated `songs/` closure.
+
+`reencode_only=true` requires every current gate attestation, the unchanged source identity and build marker, all
+13 same-source labels, and every decoded replay/archive/engine hash. It first writes a content-addressed gzip probe
+and verifies the public HTTP response. Source and marker are checked before every read and write; manifest, main
+document and marker are the final barriers. The encoding report records all JSON objects and total encoded/decoded
+size. Engine JavaScript and WASM are verified but never rewritten. A changed source or marker stops the run.
 
 **Publishing switch.** Nothing is uploaded unless the repository variable `MUSIC_DATA_PUBLISH` is `true` (unset:
 off). Off, every run, whatever its trigger (the schedule, `masterdata-updated`, `workflow_dispatch` with or without
@@ -147,7 +169,7 @@ legitimate drop (a song the game removed) stops the run: a person checks it, the
 The self-test runs in each build and locally in seconds, without the network:
 
 ```
-python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py
+python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py .github/scripts/test_music_data_compression.py .github/scripts/test_prebuilt_source_identity.py
 ```
 
 with, optionally, `MUSIC_DATA_SCHEMA` (a schema file when the checkout has none), `MUSIC_DATA_PAGE` (an
@@ -208,3 +230,10 @@ Repository variables:
   WebP bytes depend on the Pillow version.
 - **Logs.** The steps print counts, ids, SHA-256 and field names, not game content; nothing decrypted is cached or
   uploaded as an artifact.
+# HTTP compression
+
+Normal and validated-prebuilt publication uploads every JSON object at its existing `.json` URL with `Content-Type: application/json` and `Content-Encoding: gzip`. Compression uses gzip level 6 and `mtime=0`; engine JavaScript, WASM and images remain unchanged. Manifest SHA-256 values and byte counts always describe the decoded payload consumed by browser `fetch`. S3 metadata records `decoded-sha256`, `decoded-bytes`, `encoded-sha256` and `encoded-bytes` separately. Read-back gates verify both stored identity and decoded identity before advancing pointers. Python public-source reads explicitly decode the HTTP content encoding.
+
+To re-encode an already published, verified snapshot without running Rust or generating a replacement model, dispatch `music-data.yml` with `reencode_only=true`, the target `region`, and `dry_run=false`. This path shares the normal/prebuilt region lock. It requires the current source identity, an unchanged published build marker, all gate attestations, the complete SHA-bound replay runtime and all 13 Snap label tables. It checks source and marker again before each read/write, first verifies the store/CDN using a fresh gzip probe, then re-encodes the JSON payloads and externally verifies headers, stored identity and decoded identity. Manifest, music-data and build-marker decoded bytes never change. The encoding report records every object and total encoded/decoded size; it contains no game payloads or credentials.
+
+JP builds perform an actual CDN-authentication preflight before Rust/WASM allocation. A refused `Version` call remains a failed JP update; it cannot substitute another region or bypass authenticated snapshot checks. Report artifacts use canonical workspace paths so `upload-artifact@v7` can retain diagnostics.

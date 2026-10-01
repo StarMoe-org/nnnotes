@@ -33,7 +33,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: music-data-${{ inputs.region }}
+  # Both regions and songs-page.yml publish the same nine-file songs/ closure.
+  group: songs-page-publication
   cancel-in-progress: false
 
 env:
@@ -52,6 +53,10 @@ env:
 
 jobs:
   check-and-publish:
+    # Acquire the shared page lock first, then the selected data region lock.
+    concurrency:
+      group: music-data-${{ inputs.region }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -83,7 +88,8 @@ jobs:
           BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
         run: |
           python publisher/.github/scripts/prebuilt_publish.py unpack \
-            --archive "$WORK/final.zip" --sha256 "$BUNDLE_SHA256" --out "$WORK/bundle"
+            --archive "$WORK/final.zip" --sha256 "$BUNDLE_SHA256" --out "$WORK/bundle" \
+            --producer-repository "$GITHUB_REPOSITORY"
       - name: The authentic NN producer source (full history)
         uses: actions/checkout@v7
         with:
@@ -113,7 +119,7 @@ jobs:
         env:
           MUSIC_DATA_PAGE: ${{ env.WORK }}/page/examples/songs
         working-directory: producer
-        run: python -m pytest -q -p no:cacheprovider "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_jp_workflow.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_refresh.py"
+        run: python -m pytest -q -p no:cacheprovider "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_jp_workflow.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_refresh.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_compression.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_prebuilt_source_identity.py"
       - name: Genuine current API master snapshot (unchanged)
         working-directory: producer
         run: python "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" master "$WORK/master"

@@ -21,6 +21,10 @@ on:
         description: Build and check without uploading objects
         type: boolean
         default: false
+      reencode_only:
+        description: Gzip the verified published JSON snapshot without rebuilding the model
+        type: boolean
+        default: false
   schedule:
     - cron: "41 3 * * *"
 
@@ -45,7 +49,7 @@ jobs:
 
   music:
     needs: regions
-    if: needs.regions.outputs.count != '0'
+    if: needs.regions.outputs.count != '0' && github.event.inputs.reencode_only != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -58,5 +62,21 @@ jobs:
     with:
       region: ${{ matrix.region }}
       force: ${{ github.event.inputs.force == 'true' }}
+      dry_run: ${{ github.event.inputs.dry_run == 'true' }}
+    secrets: inherit
+
+  reencode:
+    needs: regions
+    if: needs.regions.outputs.count != '0' && github.event.inputs.reencode_only == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        region: ${{ fromJSON(needs.regions.outputs.regions) }}
+    concurrency:
+      group: music-data-${{ matrix.region }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/music-data-reencode-region.yml
+    with:
+      region: ${{ matrix.region }}
       dry_run: ${{ github.event.inputs.dry_run == 'true' }}
     secrets: inherit

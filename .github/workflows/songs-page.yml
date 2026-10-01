@@ -17,7 +17,7 @@ permissions:
 
 concurrency:
   # Full prebuilt publication also writes songs/. Keep the two releases ordered.
-  group: music-data
+  group: songs-page-publication
   cancel-in-progress: false
 
 env:

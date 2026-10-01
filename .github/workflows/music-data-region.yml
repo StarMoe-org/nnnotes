@@ -36,7 +36,7 @@ env:
   PLAYFETCH_VERSION: ${{ vars.PLAYFETCH_VERSION || 'v0.92' }}
   APK_PACKAGE: ${{ inputs.region == 'jp' && 'com.bushiroad.sirius' || vars.STORY_APK_PACKAGE || 'com.bilibili.sirius' }}
   PYTHON_VERSION: "3.13"
-  WORK: ${{ github.workspace }}/../work
+  WORK: ${{ github.workspace }}/music-data-work
   # Bundle keys come from secrets; catalog versions and CDN roots come from the saved master snapshot.
   NNNOTES_CATALOG_REGION: ${{ inputs.region == 'jp' && 'jp' || 'tw' }}
   NNNOTES_CATALOG_LANGUAGE: ${{ inputs.region == 'jp' && 'ja' || 'zh-Hant' }}
@@ -68,7 +68,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:
@@ -78,6 +78,20 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: pyproject.toml
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: APK
+        env:
+          PLAYFETCH_CREDENTIALS_JSON: ${{ secrets.PLAYFETCH_CREDENTIALS }}
+        run: .github/scripts/apk.sh "$WORK/apk"
+      - name: JP CDN authentication preflight
+        if: inputs.region == 'jp'
+        env:
+          NNNOTES_PATHS_APK: ${{ env.WORK }}/apk/base.apk
+        run: |
+          uv pip install --system --only-binary=:all: UnityPy numpy grpcio pycryptodome brotli
+          PYTHONPATH=src python .github/scripts/music_data.py jp-check
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -88,9 +102,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
       - name: Install nnnotes
         # builds the extension module nnnotes._deck: the deck model at the commit rust/Cargo.toml pins
         run: uv pip install --system -e ".[test]" boto3
@@ -113,12 +124,7 @@ jobs:
       - name: Gate self-test
         env:
           MUSIC_DATA_PAGE: ${{ env.WORK }}/page/examples/songs
-        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py
-
-      - name: APK
-        env:
-          PLAYFETCH_CREDENTIALS_JSON: ${{ secrets.PLAYFETCH_CREDENTIALS }}
-        run: .github/scripts/apk.sh "$WORK/apk"
+        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py .github/scripts/test_music_data_compression.py
 
       - name: Master data
         run: python .github/scripts/music_data.py master "$WORK/master"
@@ -136,6 +142,7 @@ jobs:
         run: python .github/scripts/music_data.py build "$WORK/out"
 
       - name: Gates
+        id: gates
         run: python .github/scripts/music_data.py check "$WORK/out" "$WORK/master" "$WORK/page/examples/songs"
 
       - name: Publish
@@ -154,5 +161,19 @@ jobs:
           name: music-data-reports-${{ inputs.region }}
           if-no-files-found: warn
           path: |
+            ${{ env.WORK }}/out/check.json
+            ${{ env.WORK }}/out/build.json
+            ${{ env.WORK }}/out/jp-preflight.json
+      - name: Preserve validated publication payloads for retry
+        if: always() && steps.gates.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: music-data-validated-payload-${{ inputs.region }}
+          retention-days: 3
+          if-no-files-found: error
+          path: |
+            ${{ env.WORK }}/out/music-data.json
+            ${{ env.WORK }}/out/replay
+            ${{ env.WORK }}/out/jackets
             ${{ env.WORK }}/out/check.json
             ${{ env.WORK }}/out/build.json
