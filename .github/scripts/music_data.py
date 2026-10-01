@@ -239,15 +239,26 @@ def cmd_jp_check() -> None:
     from nnnotes.config import Config
     from nnnotes.jp import Session
     from nnnotes.gameapi import GameApiError
+    expected = (story_site.build_snapshot().get("entry") or {})
+    report = {"format": "moenotes.jp-preflight/1", "clientVersion": os.environ.get("NNNOTES_SERVERS_JP_CLIENT_VERSION"),
+              "expectedMasterVersion": expected.get("version"), "expectedResourceVersion": expected.get("resource_version"),
+              "expectedResourceHash": expected.get("resource_hash"), "status": "pending"}
+    def preserve():
+        if os.environ.get("WORK"):
+            path = Path(os.environ["WORK"]) / "out/jp-preflight.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     try:
         observation = Session(Config.load(), "jp").observe(timeout=30)
     except GameApiError as error:
+        report.update(status="failed", error=str(error)); preserve()
         fail(f"JP CDN authentication preflight failed: {error}")
-    expected = (story_site.build_snapshot().get("entry") or {})
     if (observation.version.version != expected.get("version") or observation.source is None
             or observation.source.version != expected.get("resource_version")
             or observation.source.hash != expected.get("resource_hash")):
+        report.update(status="failed", error="current JP assets differ from the decoded source"); preserve()
         fail("JP Version assets differ from the decoded snapshot; refresh master data before building")
+    report.update(status="success"); preserve()
     summary("- JP CDN authentication preflight passed for the current decoded snapshot")
 
 

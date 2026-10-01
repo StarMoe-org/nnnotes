@@ -47,11 +47,12 @@ def test_actual_jp_apk_client_overrides_older_snapshot_header(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize('failure', ['denied', 'different-source', None])
-def test_jp_preflight_requires_real_auth_and_the_current_asset_snapshot(monkeypatch, failure):
+def test_jp_preflight_requires_real_auth_and_the_current_asset_snapshot(monkeypatch, tmp_path, failure):
     from types import SimpleNamespace
     class Denied(RuntimeError): pass
     gameapi = SimpleNamespace(GameApiError=Denied)
     monkeypatch.setenv('MASTERDATA_REGION', 'jp')
+    monkeypatch.setenv('WORK', str(tmp_path))
     monkeypatch.setattr(story_site, 'configure_region', lambda: None)
     expected = {'version': 'master-v', 'resource_version': '1.0.0.300', 'resource_hash': 'a' * 32}
     monkeypatch.setattr(story_site, 'build_snapshot', lambda: {'entry': expected})
@@ -73,6 +74,11 @@ def test_jp_preflight_requires_real_auth_and_the_current_asset_snapshot(monkeypa
     else:
         music_data.cmd_jp_check()
     assert calls == [30]
+    import json
+    report = json.loads((tmp_path / 'out/jp-preflight.json').read_bytes())
+    assert report['status'] == ('failed' if failure else 'success')
+    assert report['expectedResourceHash'] == expected['resource_hash']
+    assert set(report) <= {'format', 'clientVersion', 'expectedMasterVersion', 'expectedResourceVersion', 'expectedResourceHash', 'status', 'error'}
 
 
 def test_reject_mixed_master_and_catalog(monkeypatch):
