@@ -83,7 +83,8 @@ jobs:
           BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
         run: |
           python publisher/.github/scripts/prebuilt_publish.py unpack \
-            --archive "$WORK/final.zip" --sha256 "$BUNDLE_SHA256" --out "$WORK/bundle"
+            --archive "$WORK/final.zip" --sha256 "$BUNDLE_SHA256" --out "$WORK/bundle" \
+            --producer-repository "$GITHUB_REPOSITORY"
       - name: The authentic NN producer source (full history)
         uses: actions/checkout@v7
         with:
