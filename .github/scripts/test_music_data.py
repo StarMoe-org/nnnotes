@@ -190,11 +190,20 @@ def context(tmp_path: Path, doc: dict, **kw) -> tuple[bytes, Context]:
     master.mkdir(exist_ok=True)
     files = {}
     for t in TABLES:
-        data = json.dumps({"_allData": []}).encode()
+        rows = []
+        if t == "MasterLiveMusic":
+            rows = [{"_id": s["id"], "_liveScoreRankGroup": s["id"]} for s in doc.get("songs") or []]
+        elif t == "MasterLiveScoreRank":
+            names = {"E": 1, "D": 2, "C": 3, "B": 4, "A": 5, "S": 6, "SS": 7}
+            rows = [{"_id": s["id"] * 10 + i, "_group": s["id"], "_liveScoreRank": names[r["rank"]],
+                     "_requiredScore": r["requiredScore"], "_battleLiveRequiredScore": r["battleRequiredScore"]}
+                    for s in doc.get("songs") or [] for i, r in enumerate(s.get("scoreRanks") or [])]
+        data = json.dumps({"_allData": rows}).encode()
         (master / f"{t}.json").write_bytes(data)
         files[f"{t}.json"] = hashlib.sha256(data).hexdigest()
     listed = [{"name": f"{t}.bin", "hash": BIN[t], "size": 1} for t in TABLES]
     (master / music_data.MANIFEST).write_text(json.dumps({"version": "v-test", "files": listed}), encoding="utf-8")
+    files[music_data.MANIFEST] = hashlib.sha256((master / music_data.MANIFEST).read_bytes()).hexdigest()
     jackets = tmp_path / "jackets"
     jackets.mkdir(exist_ok=True)
     for s in doc.get("songs") or []:
@@ -641,13 +650,16 @@ def published_out(tmp_path, monkeypatch, s3):
     raw, ctx = context(out, sample())
     report = gates(raw, ctx)
     (out / "check.json").write_text(json.dumps(report), encoding="utf-8")
-    (out / "build.json").write_text(json.dumps({"sha256": report["sha256"],
+    source = music_data.snapshot_identity("hk-tw-mo", ctx.snapshot["entry"], ctx.snapshot["files"])
+    (out / "build.json").write_text(json.dumps({"sha256": report["sha256"], "sourceSnapshot": source,
                                                 "archive": f"archive/v-test/{report['sha256']}.json"}),
                                     encoding="utf-8")
     monkeypatch.setattr(music_data, "bucket", lambda: FakeBucket(s3))
     monkeypatch.setattr(music_data.time, "sleep", lambda s: None)
     monkeypatch.setenv("STORY_S3_ENDPOINT", "https://storage.example")
     monkeypatch.setenv("STORY_S3_BUCKET", "moenotes")
+    monkeypatch.setenv("MASTERDATA_REGION", "hk-tw-mo")
+    monkeypatch.setattr(music_data.story_site, "master_index", lambda: ("unused", ctx.snapshot))
     monkeypatch.delenv("FORCE", raising=False)
     monkeypatch.setenv("MUSIC_DATA_PUBLISH", "true")
     return out, report

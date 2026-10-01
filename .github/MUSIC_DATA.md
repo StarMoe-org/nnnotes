@@ -1,14 +1,20 @@
 # Music data workflow (StarMoe)
 
-JP: `MUSIC_DATA_MASTERDATA_REGION=jp` selects the JP package, catalog and client metadata, with
-`jp/music-data` as the default output prefix. The marker includes the asset hash and the provenance gate rejects
-a catalog from another snapshot. See [Japanese release](../docs/jp.md) for setup and validation limits.
+The daily workflow checks **TW and JP independently** by default (`MUSIC_DATA_REGIONS="hk-tw-mo jp"`). A dispatch
+checks the affected enabled regions; an older dispatch without a region list checks both. A manual run can select
+one region. The matrix has `fail-fast: false`, so an unavailable JP source does not cancel TW. Each region calls
+`music-data-region.yml` with its package, catalog, client and output prefix: TW `music-data`, JP `jp/music-data`.
+The previous global `MUSIC_DATA_MASTERDATA_REGION` no longer selects which regions run; it only preserves ownership
+of a legacy `MUSIC_DATA_S3_PREFIX` (JP-owned prefixes remain JP). Both normal and prebuilt reject equal effective
+TW/JP prefixes before publication, including slash-normalized duplicates. See [Japanese release](../docs/jp.md)
+for setup and validation limits; enabling the matrix does not certify a new client model or guarantee JP availability.
 
 International builds also pin the catalog to the downloaded master snapshot: its `resource_version` selects
 `catalog_<resource_version>_<language>.bin`, and `server.cdnRoot` supplies the mirror roots. The story workflow's
 shared helper validates and passes that exact file to the build, bypassing old `catalog_main` caches. Endpoint
-metadata is saved in `master.snapshot.json` with the table hashes. Recipe 4 causes one rebuild after upgrading
-from the old selector even if the master version is unchanged. No CDN secret is required for this selection.
+metadata is saved privately in `master.snapshot.json` with the table hashes. Recipe 5 includes the manifest hash,
+decoded file-inventory hash and consumer repository/ref in the build inputs. A table change with an unchanged
+version string rebuilds; a change to `verified_at` alone does not. No CDN secret is required for this selection.
 
 `.github/workflows/music-data.yml` keeps the music data file of the chart data page (ournotes-player
 `examples/songs`) up to date: `nnnotes music-data` of the current master data ([docs/music-data.md](../docs/music-data.md):
@@ -25,15 +31,36 @@ published into the story site's bucket under `music-data/` (`https://storage.bdo
 
 A run never deletes anything from the bucket. Its helper steps are `.github/scripts/music_data.py` (with the bucket,
 HTTP and master data helpers of `story_site.py`), `music_data_smoke.mjs`, `songs_page.sh` and `apk.sh`; the gate
-self-tests are `test_music_data.py` and `test_jp_workflow.py`. The fork also contains JP support in `src/nnnotes`.
+self-tests are `test_music_data.py`, `test_jp_workflow.py` and `test_music_data_refresh.py`.
 The Cloudflare Pages preview of the page is not part of the workflow.
+
+## Refresh evidence and limits
+
+The scheduled [run 36699637364](https://github.com/StarMoe-org/nnnotes/actions/runs/36699637364) failed on missing
+chart `Live/MusicScore/0109/0109_00` (score ID 10010900). Main `c5f39f8` already fixes the shared catalog selector
+to use the frozen master resource version; this change does not repeat that fix or silently drop missing songs.
+A single force/dry-run [36817548100](https://github.com/StarMoe-org/nnnotes/actions/runs/36817548100) validates
+that main revision separately. It is not a production publish or a run of this Draft's new matrix.
+
+[The source audit](music-data-refresh-audit.json) records the public TW file and saved JP snapshot, their hashes,
+the two sentinel songs (青春コンプレックス and Ave Mujica), and all 85 songs' passing raw threshold checks in
+each snapshot. The screenshot's first threshold set matches published TW; the second matches saved JP solo
+thresholds. This is not evidence of a same-region latest bug fix. The correct JP Version query failed with
+`UNAVAILABLE`; no latest JP observation or fresh JP native certification is claimed.
+
+Rank/reward threshold changes are master **parameters**: the hash identity schedules a refresh and the source
+gate verifies the exported values directly. Client/native **semantics** changes (score, skill conditions,
+randomness, Snap pairing) require the model's independent native validation. A fresh table hash cannot certify
+those semantics. Song scoring and arbitrary Snap profiles must use the shared evaluator; this pipeline does not
+extend the existing linear plain-skill UI domain or derive source rank thresholds from model power.
 
 ## A run
 
 1. **plan** (seconds): the inputs of a build, from `index.json` of moenotes-masterdata-sync (the snapshot's master
-   data version, resource version and client version of `MUSIC_DATA_MASTERDATA_REGION`) and the checkout (the
+   data version, resource version, client version, manifest hash and decoded file-inventory hash of the selected region)
+   and the checkout (the
    ournotes-deck commit `rust/Cargo.lock` pins, the last nnnotes commit that changed `src/`, `rust/` or
-   `pyproject.toml`, and `RECIPE` of `music_data.py`), against `inputs` of the published `build.json`. The same
+   `pyproject.toml`, consumer repository/ref and `RECIPE` of `music_data.py`), against `inputs` of the published `build.json`. The same
    inputs (and a published `music-data.json`): the run ends here. `force` builds anyway.
 2. **build**:
    - the chart data page's modules (`examples/songs` of `MUSIC_DATA_PLAYER_REF`, not built), nnnotes with its deck
@@ -48,8 +75,17 @@ The Cloudflare Pages preview of the page is not part of the workflow.
    - the gates (below); a failed gate stops the run, the job summary lists why;
    - upload: the jackets the bucket lacks (or has at another size; every one with `force`), the archive copy, then
      `music-data.json`, `build.json` last. The archive copy, the file and the marker are each read back and checked
-     against their SHA-256 before the next is written: a failure leaves the previous `build.json`, so the next run
-     builds again.
+     against their SHA-256 before the next is written. The publisher compares the checked build's public source
+     identity with the current index before uploads, and again immediately before replacing `music-data.json`.
+     A changed source stops publication and leaves any immutable archive payloads already uploaded for inspection.
+     Dry runs perform the initial freshness check too and receive no write credentials.
+
+`music-data.json` is self-contained: its provenance binds region, client, master table hashes, catalog and model.
+Publication is **not a transaction across objects**: if its upload succeeds but its read-back fails, the data file
+can already be new while `build.json` is old. The old archive is retained; no automatic rollback is claimed. The
+mutable replay manifest likewise is not an atomic switch with the data file. A future consumer migration can use
+one final pointer to immutable data/runtime manifests. This PR retains the existing consumer layout. The second
+source check narrows the race with external source updates; it cannot provide a transaction with the source service.
 
 Triggers: `repository_dispatch` `masterdata-updated` (moenotes-masterdata-sync's `dispatch_repositories` already
 names this repository for the story site: both workflows run), a daily schedule (03:41 UTC) in case a dispatch was
@@ -57,10 +93,12 @@ missed, and `workflow_dispatch`:
 
 | Input | Meaning |
 |---|---|
+| `region` | `all` (default), `hk-tw-mo` or `jp`, intersected with enabled `MUSIC_DATA_REGIONS` |
 | `force` | build and publish although the published file was made from the same inputs; upload every jacket again |
 | `dry_run` | build and check, then list what would be uploaded instead of uploading |
 
-Runs do not overlap (`concurrency: music-data`).
+Normal and prebuilt writers share `music-data-<region>` concurrency with cancellation disabled. TW and JP have
+separate output prefixes and can proceed independently. Prefix overrides must remain distinct between regions.
 
 **Publishing switch.** Nothing is uploaded unless the repository variable `MUSIC_DATA_PUBLISH` is `true` (unset:
 off). Off, every run, whatever its trigger (the schedule, `masterdata-updated`, `workflow_dispatch` with or without
@@ -84,6 +122,7 @@ Every one must pass, else nothing is published. Warnings go to the job summary a
 | `aptitude` | the Gekisou skill aptitude (every shape alone on a chart). `deck.model.gekisouAptitude` a text; `deck.gekisouAptitude`: every key, `plainKind` the page's plain kind, a `host` text, the `seedRule` (a deterministic test, increasing batches, the targets, the cross seeds), `shapes` numbered 0, 1, 2, ... (source `member` or `support`, mission 1 to 4, `bandCondition` a support skill's alone and exactly when an effect has condition 5000, effect rows with every key and their condition groups, condition 5000 without targets, skills with a level and, with a band condition alone, member targets and bands). Every chart's `deck.gekisouAptitude`: null exactly when the chart is unplayable with Gekisou on, has no Gekisou range or there is no shape; else `factors` one per range (counts; no Just or Perfect notes outside a Just range; `lotteries` `[0, 0]` outside a luck range, else the mean of `deck.seeds`' `lotResults`) and `variants` one per shape of the chart's missions (or mission 4) in shape order, a band condition shape's `bandMatch` true then false: every `[mean, se]` two finite numbers with se >= 0 (every se 0 when deterministic), ranges one per range, `tail` = `score` less the ranges' `rangeScore` and `rankBonus` (allowing 0.0005 per rounded term plus 1e-6), deterministic point deltas integers and `tailPerfect` checked against the baseline Perfect range bonuses, 1 seed when deterministic else a batch of the seed rule, with `seTargetMet` true for both exported score channels, `crossSeeds` min(seeds, the rule's), `weights` one per position and `rangeWeights` per position and range where the plain kind and `deck.seeds[0].rangeWeights` are, else null, the `check` on `deck.seeds[0]`'s seed, a rank per range (1 where the ranks are not linear), a plain kind value or null per position, within its bound (fails when any variant misses the standard error target, including at the sample cap) |
 | `finite` | no NaN or infinity (warning: one inside master data rows, `songs[].master`, which the format writes as `1e999`) |
 | `references` | texts in every language of `languages` (names and titles not empty); unique ids; songs sorted; the songs' bands, vocal characters and tags in the file; a band or a band name; a jacket, and its file in `jackets/`; a BGM cue; score ranks; charts in difficulty order, score ids unique (warnings: a title without a `zh-Hant` text, a music category on no tab, a character of no band) |
+| `sourceRanks` | every exported song ID and each raw solo `requiredScore` / room `battleRequiredScore` exactly matches downloaded `MasterLiveMusic` + `MasterLiveScoreRank`; no derived `requiredPower` is treated as a source field |
 | `bgm` | every song's BGM length: `durationMs = samples * 1000 // sampleRate`, 30 s to 10 min, within 1 s of the cue's `lengthMs`, not ending before a chart's last note (warning: more than a minute after it) |
 | `size` | 0.8 to 2 times the published file |
 | `gzip` | the file gzipped at most 2 MB (0.37 MB before the aptitude), its Gekisou skill aptitude gzipped at most 1.2 MB (about 0.4 MB expected) |
@@ -97,7 +136,7 @@ legitimate drop (a song the game removed) stops the run: a person checks it, the
 The self-test runs in each build and locally in seconds, without the network:
 
 ```
-python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py
+python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py
 ```
 
 with, optionally, `MUSIC_DATA_SCHEMA` (a schema file when the checkout has none), `MUSIC_DATA_PAGE` (an
@@ -131,8 +170,9 @@ Repository variables:
 | `MUSIC_DATA_PLAYER_REF` | none: **required** | the ournotes-player commit whose chart data page reads this file (the page with the play scenarios); a run stops before building without it |
 | `MUSIC_DATA_PUBLISH` | none: off | `true`: upload; anything else: every run is a dry run |
 | `MUSIC_DATA_PLAYER_REPOSITORY` | `empty-sekai/ournotes-player` | |
-| `MUSIC_DATA_S3_PREFIX` | `music-data` | the key prefix in the bucket |
-| `MUSIC_DATA_MASTERDATA_REGION` | `hk-tw-mo` | the region of `index.json`; the build reads the TW catalog (`[catalog] region` `tw`) |
+| `MUSIC_DATA_REGIONS` | `hk-tw-mo jp` | regions checked independently by dispatch/schedule |
+| `MUSIC_DATA_TW_S3_PREFIX` | `music-data` | TW output prefix (falls back to legacy `MUSIC_DATA_S3_PREFIX`) |
+| `MUSIC_DATA_JP_S3_PREFIX` | `jp/music-data` | JP output prefix; must differ from TW |
 | `STORY_S3_ENDPOINT`, `STORY_S3_BUCKET`, `MASTERDATA_BASE_URL`, `PLAYFETCH_VERSION`, `STORY_APK_PACKAGE` | the story site's | shared with it |
 
 ## Before the first run
@@ -151,9 +191,8 @@ Repository variables:
 - **Versions.** A new ournotes-deck pin (`rust/Cargo.toml`, `rust/Cargo.lock`) or a new nnnotes commit in `src/`,
   `rust/` or `pyproject.toml` reaches this fork with a sync, and the next run builds a new file. The deck
   statistics may then differ: `provenance.deck.commit` and `build.json` name the commit.
-- **The page and the data.** The page's modules are pinned by `MUSIC_DATA_PLAYER_REF`: after a page release that
-  reads new fields, move it (a new ref alone does not start a build; run with `force` to check the published data
-  against the new page).
+- **The page and the data.** The page's modules are pinned by `MUSIC_DATA_PLAYER_REF`: changing that pin or its
+  repository is now a build input and starts a new check. Use an immutable commit to keep the consumer identity stable.
 - **Byte identity.** A build from the same inputs gives the same bytes (the file is canonical); the jackets'
   WebP bytes depend on the Pillow version.
 - **Logs.** The steps print counts, ids, SHA-256 and field names, not game content; nothing decrypted is cached or
