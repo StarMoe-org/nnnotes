@@ -36,6 +36,21 @@ def test_publisher_uses_the_real_bucket_contract_instead_of_a_fake_listing_api(t
     assert bucket.object_size("music-data.json") == len(s3.store["music-data/music-data.json"])
 
 
+def test_same_size_corrupt_archive_is_restored_and_verified_before_any_pointer(tmp_path, monkeypatch):
+    s3 = FakeS3(); out, report = published_out(tmp_path, monkeypatch, s3)
+    md.cmd_publish(str(out)); s3.log.clear()
+    archive = f"music-data/archive/v-test/{report['sha256']}.json"
+    previous = s3.store[archive]
+    damaged = bytearray(previous); damaged[len(damaged) // 2] ^= 1
+    s3.store[archive] = bytes(damaged)
+    assert len(previous) == len(s3.store[archive])
+    monkeypatch.setattr(transport, "get_object", lambda url, **kwargs: s3.get_object(Bucket="moenotes", Key="music-data/" + url.split("/music-data/", 1)[1]))
+    md.cmd_publish(str(out))
+    assert [key for key, _, _ in s3.log] == [archive, "music-data/music-data.json", "music-data/build.json"]
+    assert s3.store[archive] == previous
+    transport.verify_object(s3.get_object(Bucket="moenotes", Key=archive), report["sha256"], compressed_json=True)
+
+
 @pytest.mark.parametrize("defect", ["missing-encoding", "wrong-type", "wrong-size", "wrong-stored-sha", "wrong-decoded-sha", "corrupt-body"])
 def test_wrong_encoding_or_either_identity_is_rejected(defect):
     raw = b'{"test":true}'; body, extra = transport.encode_json(raw)

@@ -1471,6 +1471,13 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
         print(f"cannot list the bucket ({type(e).__name__}): the dry run lists every object", flush=True)
         have, archived = {}, False
     new = [j for j in jackets if force or have.get(JACKETS + j.name) != j.stat().st_size]
+    if archived and not dry_run and publishing():
+        try:
+            read_back(b, marker["archive"], marker["sha256"])
+        except SystemExit:
+            # An equal stored length is not evidence of identity; restore the checked decoded bytes before pointers.
+            print("existing archive failed identity verification; replacing it from the checked payload", flush=True)
+            archived = False
     steps = [(JACKETS + j.name, j, JACKET_CACHE, False) for j in new]
     if not archived:
         steps.append((marker["archive"], o / FILE, ARCHIVE_CACHE, True))

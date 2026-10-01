@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import io
 import urllib.request
+import zlib
 
 METADATA_KEYS = ("decoded-sha256", "decoded-bytes", "encoded-sha256", "encoded-bytes")
 
@@ -26,7 +27,10 @@ def decode_content(raw: bytes, encoding: str | None) -> bytes:
         return raw
     if encoding.lower().strip() != "gzip":
         raise ValueError("unsupported HTTP content encoding")
-    return gzip.decompress(raw)
+    try:
+        return gzip.decompress(raw)
+    except (OSError, EOFError, zlib.error):
+        raise ValueError("invalid gzip content") from None
 
 
 def get_object(url: str, timeout: int = 300) -> dict:

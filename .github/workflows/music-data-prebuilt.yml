@@ -113,7 +113,7 @@ jobs:
         env:
           MUSIC_DATA_PAGE: ${{ env.WORK }}/page/examples/songs
         working-directory: producer
-        run: python -m pytest -q -p no:cacheprovider "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_jp_workflow.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_refresh.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_compression.py"
+        run: python -m pytest -q -p no:cacheprovider "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_jp_workflow.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_refresh.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_compression.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_prebuilt_source_identity.py"
       - name: Genuine current API master snapshot (unchanged)
         working-directory: producer
         run: python "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" master "$WORK/master"
