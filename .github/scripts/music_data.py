@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -44,13 +45,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import story_site                                   # noqa: E402  (the bucket, HTTP and master data helpers)
+import http_compression                             # noqa: E402
 from story_site import env, get, output, summary   # noqa: E402
 
 FORMAT = "nnnotes.music-data/1"
 BUILD_FORMAT = "moenotes.music-data-build/1"
 # This script's own version of a build: bump it when what it builds or publishes changes, so that the next run builds
 # although the master data, the deck model and nnnotes are the same.
-RECIPE = 4
+RECIPE = 5
 FILE, MARKER, JACKETS, ARCHIVE = "music-data.json", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
 SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
@@ -79,6 +81,9 @@ APTITUDE_SLACK = 1e-6                               # relative: the aptitude's i
 DIFFICULTIES = ("easy", "normal", "hard", "expert")
 SONG_TABLES = ("MasterLiveMusic", "MasterLiveMusicScore", "MasterText", "MasterBand", "MasterCharacter", "MasterTag",
                "MasterLiveMusicCategory", "MasterSound", "MasterSoundCueSheet", "MasterLiveScoreRank")
+REPLAY_LABEL_TABLES = ("MasterSupportSkill", "MasterSupportSkillEffect", "MasterGekisouSupportSkill",
+                       "MasterGekisouSupportSkillEffect", "MasterText", "MasterSkillConditionSet", "MasterSkillCondition",
+                       "MasterSkillCumulativeCondition", "MasterSkillTarget", "MasterCharacter", "MasterMemberCard", "MasterSupportCard", "MasterBand")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 LISTED = 20                                         # failures and warnings listed per gate
@@ -96,6 +101,16 @@ def sha256(data: bytes) -> str:
 def s3_prefix() -> str:
     p = (os.environ.get("MUSIC_DATA_S3_PREFIX") or "music-data").strip("/")
     return f"{p}/" if p else ""
+
+
+def require_distinct_region_prefixes() -> None:
+    """Reject a legacy/custom configuration that lets independent region writers share one directory."""
+    tw = os.environ.get("MUSIC_DATA_TW_PREFIX_CHECK")
+    jp = os.environ.get("MUSIC_DATA_JP_PREFIX_CHECK")
+    if tw is None and jp is None:
+        return  # A standalone one-region CLI has no second configured writer.
+    if tw is None or jp is None or tw.strip("/") == jp.strip("/"):
+        fail("TW and JP output prefixes must be distinct; migrate MUSIC_DATA_S3_PREFIX to region-specific prefixes")
 
 
 def bucket() -> "story_site.Bucket":
@@ -165,12 +180,86 @@ def require_decoded_master(root: Path = Path(".")) -> None:
              "upstream (.github/MUSIC_DATA.md)")
 
 
-def inputs(entry: dict, root: Path = Path(".")) -> dict:
-    """What a build is made of: the master data snapshot, the deck model, nnnotes and this script."""
-    return {"masterRegion": env("MASTERDATA_REGION"), "masterVersion": entry.get("version"),
+def snapshot_identity(region: str, entry: dict, files: dict) -> dict:
+    """Public content identity only: never publish server endpoints or credentials."""
+    if not files or any(not isinstance(k, str) or not isinstance(v, str) or not SHA256.fullmatch(v)
+                        for k, v in files.items()):
+        fail("source snapshot has no valid decoded file hashes")
+    if MANIFEST not in files:
+        fail("source snapshot has no MasterManifest.json hash")
+    if entry.get("manifest_sha256") and entry["manifest_sha256"] != files[MANIFEST]:
+        fail("source snapshot manifest hash differs from the file inventory")
+    return {"masterRegion": region, "masterVersion": entry.get("version"),
             "resourceVersion": entry.get("resource_version"), "clientVersion": entry.get("client_version"),
-            "resourceHash": entry.get("resource_hash"),
-            "deckCommit": deck_commit(root), "nnnotesCommit": nnnotes_commit(root), "recipe": RECIPE}
+            "resourceHash": entry.get("resource_hash"), "manifestSha256": entry.get("manifest_sha256") or files.get(MANIFEST),
+            "decodedFilesSha256": sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode())}
+
+
+def inputs(entry: dict, root: Path = Path("."), *, files: dict | None = None) -> dict:
+    """What a build is made of: the master data snapshot, the deck model, nnnotes and this script."""
+    identity = snapshot_identity(env("MASTERDATA_REGION"), entry, files) if files is not None else {
+            "masterRegion": env("MASTERDATA_REGION"), "masterVersion": entry.get("version"),
+            "resourceVersion": entry.get("resource_version"), "clientVersion": entry.get("client_version"),
+            "resourceHash": entry.get("resource_hash"), "manifestSha256": entry.get("manifest_sha256")}
+    return {**identity, "deckCommit": deck_commit(root), "nnnotesCommit": nnnotes_commit(root),
+            "playerRepository": os.environ.get("PLAYER_REPOSITORY"), "playerRef": os.environ.get("PLAYER_REF"),
+            "recipe": RECIPE}
+
+
+def require_current_source(marker: dict) -> None:
+    """Fail closed if a frozen build is no longer the selected region's current source."""
+    expected = marker.get("sourceSnapshot")
+    if not isinstance(expected, dict) or expected.get("masterRegion") != env("MASTERDATA_REGION"):
+        fail("build has no source snapshot for the selected region; run check again")
+    _, current = story_site.master_index()
+    actual = snapshot_identity(env("MASTERDATA_REGION"), current.get("entry") or {}, current.get("files") or {})
+    if actual != expected:
+        changed = ", ".join(k for k in actual if actual[k] != expected.get(k))
+        fail(f"source snapshot changed after build ({changed}); rebuild before publishing")
+
+
+def cmd_regions() -> None:
+    """Reuse the existing dispatch selection rules for independent TW/JP jobs."""
+    payload = None
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if path and Path(path).is_file():
+        value = (json.loads(Path(path).read_text()).get("client_payload") or {}).get("regions")
+        payload = [v for v in value if isinstance(v, str)] if isinstance(value, list) else None
+    selected = story_site.select_regions(env("MUSIC_DATA_REGIONS", "hk-tw-mo jp"),
+        os.environ.get("GITHUB_EVENT_NAME", ""), payload, os.environ.get("REQUESTED_REGION", ""))
+    output("regions", json.dumps(selected))
+    output("count", str(len(selected)))
+
+
+def cmd_jp_check() -> None:
+    """Check the actual JP credential path before allocating Rust/WASM build work."""
+    if env("MASTERDATA_REGION") != "jp":
+        fail("JP preflight requires the JP region")
+    story_site.configure_region()
+    from nnnotes.config import Config
+    from nnnotes.jp import Session
+    from nnnotes.gameapi import GameApiError
+    expected = (story_site.build_snapshot().get("entry") or {})
+    report = {"format": "moenotes.jp-preflight/1", "clientVersion": os.environ.get("NNNOTES_SERVERS_JP_CLIENT_VERSION"),
+              "expectedMasterVersion": expected.get("version"), "expectedResourceVersion": expected.get("resource_version"),
+              "expectedResourceHash": expected.get("resource_hash"), "status": "pending"}
+    def preserve():
+        if os.environ.get("WORK"):
+            path = Path(os.environ["WORK"]) / "out/jp-preflight.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    try:
+        observation = Session(Config.load(), "jp").observe(timeout=30)
+    except GameApiError as error:
+        report.update(status="failed", error=str(error)); preserve()
+        fail(f"JP CDN authentication preflight failed: {error}")
+    if (observation.version.version != expected.get("version") or observation.source is None
+            or observation.source.version != expected.get("resource_version")
+            or observation.source.hash != expected.get("resource_hash")):
+        report.update(status="failed", error="current JP assets differ from the decoded source"); preserve()
+        fail("JP Version assets differ from the decoded snapshot; refresh master data before building")
+    report.update(status="success"); preserve()
+    summary("- JP CDN authentication preflight passed for the current decoded snapshot")
 
 
 def short(v) -> str:
@@ -179,9 +268,10 @@ def short(v) -> str:
 
 # ---------------------------------------------------------------- plan
 def cmd_plan() -> None:
+    require_distinct_region_prefixes()
     _, region = story_site.master_index()
     require_decoded_master()
-    now = inputs(region.get("entry") or {})
+    now = inputs(region.get("entry") or {}, files=region["files"])
     raw = published(MARKER)
     marker = json.loads(raw) if raw else None
     have = marker.get("inputs") if isinstance(marker, dict) else None
@@ -286,12 +376,15 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
     if not pointer:
         return []
     root = out.resolve()
+    if (not SHA256.fullmatch(str(pointer.get("sha256")))
+            or pointer.get("manifestUrl") != f"replay/{pointer['sha256']}/manifest.json"):
+        raise ValueError("replay manifest must use its immutable SHA directory")
     def local(base: Path, url: str) -> Path:
         if not isinstance(url, str) or not url or any(c in url for c in (":", "\\", "?", "#")) or Path(url).is_absolute():
             raise ValueError("replay artifact URL must be a relative file path")
         path = (base / url).resolve()
-        if not path.is_relative_to(root):
-            raise ValueError("replay artifact URL must stay within the output directory")
+        if not path.is_relative_to(root) or not path.is_relative_to(base.resolve()):
+            raise ValueError("replay artifact URL must stay within its immutable bundle directory")
         return path
     manifest_path = local(root, pointer["manifestUrl"])
     raw = manifest_path.read_bytes()
@@ -306,12 +399,27 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
     if engine["model"]["commit"] != doc["provenance"]["deck"]["commit"]:
         raise ValueError("replay engine and music data name different model commits")
     paths = []
-    for entry in [manifest["deckData"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"]]:
+    entries = [manifest["deckData"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"]]
+    if "snapLabels" in manifest:
+        entries.append(manifest["snapLabels"])
+    for entry in entries:
         path = local(manifest_path.parent, entry["url"])
         data = path.read_bytes()
         if sha256(data) != entry["sha256"] or len(data) != entry["bytes"]:
             raise ValueError(f"replay artifact SHA/size mismatch: {entry['url']}")
         paths.append(path)
+    if "snapLabels" in manifest:
+        labels = json.loads(local(manifest_path.parent, manifest["snapLabels"]["url"]).read_bytes())
+        provenance = doc["provenance"]
+        if (manifest["snapLabels"].get("format") != "nnnotes.replay-labels/1"
+                or labels.get("format") != "nnnotes.replay-labels/1" or labels.get("region") != provenance["region"]
+                or labels.get("masterVersion") != provenance["master"]["version"]):
+            raise ValueError("replay labels differ from the music-data snapshot")
+        for name in REPLAY_LABEL_TABLES:
+            table = (labels.get("tables") or {}).get(name) or {}
+            if (not isinstance(table.get("rows"), list) or not SHA256.fullmatch(str(table.get("sha256")))
+                    or table["sha256"] != provenance["master"]["tables"].get(name, {}).get("sha256")):
+                raise ValueError(f"replay labels {name} differs from the master provenance")
     expected_ids = sorted(c["scoreId"] for s in doc["songs"] for c in s["charts"])
     if sorted(c["scoreId"] for c in manifest["charts"]) != expected_ids or pointer.get("charts") != len(expected_ids):
         raise ValueError("replay chart IDs/count differ from music data")
@@ -1160,6 +1268,33 @@ def gate_bgm(doc, ctx: Context, g: Gate):
         g.note = f"{min(lengths) / 1000:.1f} s to {max(lengths) / 1000:.1f} s"
 
 
+def gate_source_ranks(doc, ctx: Context, g: Gate):
+    """Check raw solo/room thresholds against the downloaded, hash-checked source tables."""
+    if ctx.master is None:
+        g.note = "skipped: no decoded source tables"
+        return
+    def rows(table):
+        return json.loads((ctx.master / f"{table}.json").read_bytes())["_allData"]
+    musics = {r["_id"]: r for r in rows("MasterLiveMusic")}
+    names = {1: "E", 2: "D", 3: "C", 4: "B", 5: "A", 6: "S", 7: "SS"}
+    groups = {}
+    for row in sorted(rows("MasterLiveScoreRank"), key=lambda r: (r.get("_requiredScore") or 0, r.get("_id") or 0)):
+        if row.get("_liveScoreRank") not in names:
+            g.fail(f"source rank {row.get('_id')}: unknown enum")
+            continue
+        groups.setdefault(row.get("_group"), []).append({"rank": names[row["_liveScoreRank"]],
+            "requiredScore": row.get("_requiredScore"), "battleRequiredScore": row.get("_battleLiveRequiredScore")})
+    song_ids = {s.get("id") for s in doc.get("songs") or []}
+    if song_ids != set(musics):
+        g.fail("exported song ids differ from the downloaded MasterLiveMusic")
+    for song in doc.get("songs") or []:
+        music = musics.get(song.get("id"))
+        expected = groups.get(music.get("_liveScoreRankGroup"), []) if music else []
+        if not expected or song.get("scoreRanks") != expected:
+            g.fail(f"song {song.get('id')}: solo/room scoreRanks differ from downloaded source")
+    g.note = f"{len(song_ids)} songs: requiredScore and battleRequiredScore checked separately; no derived power"
+
+
 def gate_page(doc, ctx: Context, g: Gate):
     """The chart data page's own modules (catalog.js, ranking.js) over the file in Node.js: music_data_smoke.mjs."""
     if ctx.page is None:
@@ -1180,7 +1315,7 @@ def gate_page(doc, ctx: Context, g: Gate):
 
 GATES = (("schema", gate_schema), ("provenance", gate_provenance), ("counts", gate_counts), ("deck", gate_deck),
          ("scenarios", gate_scenarios), ("aptitude", gate_aptitude), ("finite", gate_finite),
-         ("references", gate_references), ("bgm", gate_bgm), ("size", gate_size), ("gzip", gate_gzip),
+         ("references", gate_references), ("sourceRanks", gate_source_ranks), ("bgm", gate_bgm), ("size", gate_size), ("gzip", gate_gzip),
          ("page", gate_page))
 
 
@@ -1260,7 +1395,8 @@ def cmd_check(out: str, master: str, page: str) -> None:
         "archive": f"{ARCHIVE}{version}/{report['sha256']}.json",
         "songs": len(doc["songs"]), "charts": sum(len(s["charts"]) for s in doc["songs"]),
         "jackets": len(list((o / "jackets").glob("*.webp"))),
-        "inputs": inputs(snapshot["entry"]),
+        "inputs": inputs(snapshot["entry"], files=snapshot["files"]),
+        "sourceSnapshot": snapshot_identity(snapshot["region"], snapshot["entry"], snapshot["files"]),
         "provenance": {"region": p["region"], "client": p["client"], "masterVersion": p["master"]["version"],
                        "deckCommit": p["deck"]["commit"], "exporterVersion": p["exporter"]["version"]},
         "player": {"repository": os.environ.get("PLAYER_REPOSITORY"), "ref": os.environ.get("PLAYER_REF")},
@@ -1277,23 +1413,38 @@ def upload(b, key: str, src: Path, cache: str) -> None:
     types = {".wasm":"application/wasm", ".js":"text/javascript"}
     extra = {"ContentType": types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream")),
              "CacheControl": cache}
-    b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
+    if src.suffix.lower() == ".json":
+        encoded, transport = http_compression.encode_json(src.read_bytes())
+        b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
+    else:
+        b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
 
 
 def read_back(b, key: str, digest: str) -> None:
-    """The object as stored (S3 GET), else as served (plain HTTP), must have the SHA-256 uploaded."""
+    """Verify stored encoding/metadata and decoded SHA before advancing a public pointer."""
+    compressed_json = key.lower().endswith(".json")
+    try:
+        # This is the consumer's actual response, with the same complete transport contract.
+        # Some signed SDK responses fail this contract; retrying them need not delay a valid public response.
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
+                                       compressed_json=compressed_json)
+        return
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     for attempt in range(4):
         try:
-            if sha256(b.s3.get_object(Bucket=b.name, Key=b.prefix + key)["Body"].read()) == digest:
-                return
+            http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest,
+                                           compressed_json=compressed_json)
+            return
         except Exception as e:                       # Cloudflare in front of the store rejects a signed GET at times
             print(f"read back {key}: {type(e).__name__}", flush=True)
         time.sleep(3 * (attempt + 1))
     try:
-        if sha256(get(public_url(key), timeout=300)) == digest:
-            return
-    except urllib.error.URLError as e:
-        print(f"read back {key} over HTTP: {e}", flush=True)
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
+                                       compressed_json=compressed_json)
+        return
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     fail(f"{key}: the bucket does not serve what was uploaded (SHA-256 {digest[:12]})")
 
 
@@ -1303,6 +1454,7 @@ def publishing() -> bool:
 
 
 def cmd_publish(out: str, dry_run: bool = False) -> None:
+    require_distinct_region_prefixes()
     if not publishing() and not dry_run:
         summary("- publishing is off (the repository variable MUSIC_DATA_PUBLISH is not `true`): a dry run")
         dry_run = True
@@ -1316,20 +1468,28 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
         runtime = replay_resources(o, json.loads(raw))
     except (OSError, ValueError, KeyError, TypeError) as error:
         fail(f"replay resources changed after gates: {error}")
+    require_current_source(marker)
     b = bucket()
     if not b.writable and not dry_run:
         fail("publish needs STORY_S3_ACCESS_KEY and STORY_S3_SECRET_KEY")
     force = os.environ.get("FORCE") == "true"
+    jackets = sorted((o / "jackets").glob("*.webp"))
     try:
-        have = b.keys(JACKETS)
-        archived = b.keys(marker["archive"]).get(marker["archive"]) == len(raw)
+        have = {JACKETS + jacket.name: b.object_size(JACKETS + jacket.name) for jacket in jackets}
+        archived = b.object_size(marker["archive"]) == len(http_compression.encode_json(raw)[0])
     except Exception as e:                           # a dry run without a key where the bucket lists to none
         if not dry_run:
             raise
         print(f"cannot list the bucket ({type(e).__name__}): the dry run lists every object", flush=True)
         have, archived = {}, False
-    jackets = sorted((o / "jackets").glob("*.webp"))
     new = [j for j in jackets if force or have.get(JACKETS + j.name) != j.stat().st_size]
+    if archived and not dry_run and publishing():
+        try:
+            read_back(b, marker["archive"], marker["sha256"])
+        except SystemExit:
+            # An equal stored length is not evidence of identity; restore the checked decoded bytes before pointers.
+            print("existing archive failed identity verification; replacing it from the checked payload", flush=True)
+            archived = False
     steps = [(JACKETS + j.name, j, JACKET_CACHE, False) for j in new]
     if not archived:
         steps.append((marker["archive"], o / FILE, ARCHIVE_CACHE, True))
@@ -1351,6 +1511,9 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
             read_back(b, key, sha256(src.read_bytes()))
         story_site.parallel(upload_checked, checked[:-barriers], workers=8)
         for step in checked[-barriers:]:
+            if step[0] == FILE:
+                # A source update during archive/runtime uploads must not replace current music-data.json.
+                require_current_source(marker)
             upload_checked(step)
     summary(f"- {'would publish' if dry_run else 'published'} {len(new)} jackets (of {len(jackets)}), "
             f"{'the archive copy, ' if not archived else ''}{FILE} ({len(raw)} bytes, sha256 "
@@ -1361,7 +1524,11 @@ def main(argv: list[str]) -> None:
     if not argv:
         sys.exit(__doc__)
     cmd, args = argv[0], argv[1:]
-    if cmd == "plan" and not args:
+    if cmd == "regions" and not args:
+        cmd_regions()
+    elif cmd == "jp-check" and not args:
+        cmd_jp_check()
+    elif cmd == "plan" and not args:
         cmd_plan()
     elif cmd == "master" and len(args) == 1:
         cmd_master(args[0])

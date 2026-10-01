@@ -223,7 +223,8 @@ def test_fetch_does_not_ignore_missing_advertised_manifest(tmp_path, public_site
 def test_publish_skips_existing_assets_and_uploads_indexes_last(tmp_path, monkeypatch):
     site = tmp_path / "site"
     files = {"assets/existing.gz": b"same", "assets/new.gz": b"new", "assets/changed.gz": b"longer",
-             "stories/10946.json": b"story", "stories.json": b"index", "models/a.json": b"unchanged"}
+             "stories/10946.json": b"story", "stories.json": b"index", "models/a.json": b"unchanged",
+             "songs/index.html": b"legacy consumer", "songs/replay-worker.js": b"legacy worker"}
     for path, data in files.items():
         dest = site / path
         dest.parent.mkdir(parents=True, exist_ok=True)

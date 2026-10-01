@@ -36,6 +36,7 @@ import urllib.request
 from urllib.parse import urlsplit
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from http_compression import decode_content
 
 INDEXES = ("stories.json", "models.json", "charts.json")
 ASSETS = "assets/"
@@ -52,9 +53,9 @@ TYPES = {".json": "application/json", ".gz": "application/gzip", ".br": "applica
 def get(url: str, timeout: int = 120) -> bytes:
     # an explicit User-Agent: Cloudflare in front of the services refuses Python-urllib's
     request = urllib.request.Request(url, headers={"User-Agent": "moenotes-story-site (GitHub Actions)",
-                                                   "Cache-Control": "no-cache"})
+                                                   "Cache-Control": "no-cache", "Accept-Encoding": "gzip"})
     with urllib.request.urlopen(request, timeout=timeout) as r:
-        return r.read()
+        return decode_content(r.read(), r.headers.get("Content-Encoding"))
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -282,8 +283,14 @@ def configure_region() -> None:
         u = urlsplit(bundle)
         cdn = f"{u.scheme}://{u.netloc}"
     client = entry.get("client_version")
+    apk = os.environ.get("NNNOTES_PATHS_APK")
+    if apk:
+        from nnnotes.gameapi import apk_version_name
+        client = apk_version_name(Path(apk))
+        if not client:
+            sys.exit("story_site: configured JP APK lacks versionName; refusing a snapshot client fallback")
     if not all(isinstance(v, str) and v for v in (api, cdn, client)):
-        sys.exit("story_site: JP snapshot lacks API/CDN/client metadata")
+        sys.exit("story_site: JP source lacks API/CDN/client metadata")
     os.environ.update(NNNOTES_SERVERS_JP_API=api, NNNOTES_SERVERS_JP_CDN=cdn,
                       NNNOTES_SERVERS_JP_CLIENT_VERSION=client, NNNOTES_SERVERS_JP_PROVIDER="jp")
 
@@ -472,7 +479,9 @@ def cmd_publish(site_dir: str, dry_run: bool = False) -> None:
     if not bucket.writable and not dry_run:
         sys.exit("story_site: publish needs STORY_S3_ACCESS_KEY and STORY_S3_SECRET_KEY")
     before = json.loads(fetched_file(site).read_text(encoding="utf-8"))
-    local = sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.is_file())
+    # The dedicated songs publishers own this shared page and its pinned consumer closure.
+    local = sorted(p.relative_to(site).as_posix() for p in site.rglob("*")
+                   if p.is_file() and not p.relative_to(site).as_posix().startswith("songs/"))
     assets = [k for k in local if k.startswith(ASSETS)]
     with ThreadPoolExecutor(max_workers=16) as executor:
         have = dict(zip(assets, executor.map(bucket.object_size, assets)))

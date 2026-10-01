@@ -68,14 +68,14 @@ def inventory_entry(path):
 def validate_exporter_identity(root, proof, verify_raw_checkout=False):
     """Prove committed blobs and explicitly reconstruct producer byte identity in memory.
 
-    Git's cli.py has LF; the measured Windows producer had CRLF. Neither checksum
-    is relabeled as the other, and the CI checkout is never edited for this check.
+    Linux can use canonical bytes; a Windows checkout may declare observed
+    LF-to-CRLF conversions. CI reconstructs only those conversions in memory.
     """
     identity = proof.get("exporterSourceIdentity", {})
     require(identity.get("format") == "ournotes.exporter-source-identity/1", "missing exporter source identity")
     paths = git(root, "ls-tree", "-r", "--name-only", "HEAD", "--", "src/nnnotes").splitlines()
     paths = sorted(p for p in paths if p.endswith(".py"))
-    require(len(paths) == identity.get("fileCount") == 75, "exporter Python source count mismatch")
+    require(paths and len(paths) == identity.get("fileCount"), "exporter Python source count mismatch")
     blobs = {p: subprocess.check_output(["git", "-C", str(root), "show", "HEAD:" + p]) for p in paths}
     def tree_hash(items):
         values = {p: hashlib.sha256(raw).hexdigest() for p, raw in items.items()}
@@ -85,11 +85,17 @@ def validate_exporter_identity(root, proof, verify_raw_checkout=False):
     normalized = {p: hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest() for p, raw in blobs.items()}
     normalized_tree = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     transforms = identity.get("checkoutTransforms")
-    require(transforms == [{"path": "src/nnnotes/cli.py", "operation": "lf-to-crlf"}],
-            "unexpected producer checkout transform")
-    source = blobs["src/nnnotes/cli.py"]
-    require(b"\r" not in source, "canonical cli.py is not LF-only")
-    blobs["src/nnnotes/cli.py"] = source.replace(b"\n", b"\r\n")
+    require(isinstance(transforms, list), "missing producer checkout transforms")
+    seen = set()
+    for transform in transforms:
+        require(isinstance(transform, dict) and set(transform) == {"path", "operation"}
+                and transform["operation"] == "lf-to-crlf" and transform["path"] in blobs
+                and transform["path"] not in seen, "unexpected producer checkout transform")
+        path = transform["path"]
+        seen.add(path)
+        source = blobs[path]
+        require(b"\r" not in source, "canonical transformed source is not LF-only")
+        blobs[path] = source.replace(b"\n", b"\r\n")
     raw_tree = tree_hash(blobs)
     require(raw_tree == identity.get("rawTreeSha256") == proof.get("exporterSourceTreeSha256"),
             "reconstructed producer byte tree mismatch")
