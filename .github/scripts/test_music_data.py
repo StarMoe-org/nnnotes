@@ -769,6 +769,45 @@ def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatc
     assert types["music-data/replay/engine/ournotes_replay_bg.wasm"] == "application/wasm"
 
 
+@pytest.mark.parametrize("defect", [None, "bytes", "region", "table_hash"])
+def test_replay_labels_are_checked_and_uploaded_before_manifest(tmp_path, monkeypatch, defect):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    doc, manifest = replay_out(out)
+    tables = {name: {"sha256": "ab" * 32, "rows": []} for name in music_data.REPLAY_LABEL_TABLES}
+    for name in tables:
+        doc["provenance"]["master"]["tables"][name] = {"sha256": "ab" * 32}
+    labels = {"format": "nnnotes.replay-labels/1", "region": doc["provenance"]["region"],
+              "masterVersion": doc["provenance"]["master"]["version"], "tables": tables}
+    if defect == "region":
+        labels["region"] = "jp"
+    elif defect == "table_hash":
+        labels["tables"]["MasterText"]["sha256"] = "cd" * 32
+    raw = json.dumps(labels).encode()
+    path = out / "replay" / "snap-labels.json"
+    path.write_bytes(raw)
+    manifest["snapLabels"] = {"format": labels["format"], "url": "snap-labels.json", "sha256": music_data.sha256(raw), "bytes": len(raw)}
+    raw = json.dumps(manifest).encode()
+    (out / "replay" / "manifest.json").write_bytes(raw)
+    doc["replay"]["sha256"] = music_data.sha256(raw)
+    raw = json.dumps(doc).encode()
+    (out / music_data.FILE).write_bytes(raw)
+    for name in ("check.json", "build.json"):
+        report = json.loads((out / name).read_bytes())
+        report["sha256"] = music_data.sha256(raw)
+        (out / name).write_text(json.dumps(report))
+    if defect == "bytes":
+        path.write_bytes(b"tampered labels")
+    if defect:
+        with pytest.raises(SystemExit, match="replay resources changed after gates"):
+            music_data.cmd_publish(str(out))
+        assert not s3.store
+    else:
+        music_data.cmd_publish(str(out))
+        keys = [key for key, _, _ in s3.log]
+        assert keys.index("music-data/replay/snap-labels.json") < keys.index("music-data/replay/manifest.json")
+
+
 @pytest.mark.parametrize("changed", ["bytes", "model", "escape", "absolute", "ids", "abi", "dirty"])
 def test_replay_identity_failure_prevents_any_upload(tmp_path, monkeypatch, changed):
     s3 = FakeS3()

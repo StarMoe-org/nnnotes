@@ -1107,7 +1107,8 @@ def export(out, src: deckdata.MasterSource, key, fetch: Callable[[str], bytes],
         replay_files = None
         if replay_dir is not None:
             from . import replaydata
-            replay_files, replay_manifest = replaydata.bundle(doc, replay_engine)
+            replay_files, replay_manifest = replaydata.bundle(doc, replay_engine,
+                label_source=replaydata.labels(tables, shas, doc["provenance"]))
             manifest_sha = hashlib.sha256(replay_files["manifest.json"]).hexdigest()
             replay_target = Path(replay_dir) / manifest_sha
             try:

@@ -1,6 +1,6 @@
 {
   "collectedAt": "2026-10-01",
-  "scope": "Saved snapshots, not a successful latest JP Version observation",
+  "scope": "Saved TW/JP comparison and subsequent SHA-verified TW master change, not a successful latest JP Version observation",
   "samples": [
     {
       "label": "published-tw",
@@ -230,11 +230,18 @@
     "head": "c5f39f85c6e54f1532b4b81837434ec2015f59dd",
     "force": true,
     "dryRun": true,
-    "statusAtCollection": "in-progress"
+    "statusAtCollection": "success"
+  },
+  "subsequentTWObservation": {
+    "evidence": "latest-tw-sentinel-diff.json",
+    "masterVersion": "74639bc3f98486a22b1232f232213def",
+    "status": "metadata-snapshot-sha-verified-not-direct-gameapi-observation",
+    "songs": 86,
+    "scope": "Both sentinel songs' solo/room rank master parameters changed; song/difficulty master rows unchanged; chart bytes and native scoring semantics not certified"
   },
   "interpretation": [
     "The screenshot values 415687/1204973/3429867/4638937/5637904 match published TW music100021 solo and room fields.",
-    "The values 495117/1731771/4389644/6133727/7577522 match saved JP music100021 solo fields; saved JP room fields differ.",
-    "This cross-region comparison does not establish a same-region latest chart correction or a note-score formula change."
+    "The values 495117/1731771/4389644/6133727/7577522 match saved JP music100021 solo fields and the subsequent SHA-verified TW master; their room fields differ.",
+    "The subsequent TW comparison verifies same-region rank-parameter changes. Neither comparison establishes chart asset corrections or a note-score formula change."
   ]
 }

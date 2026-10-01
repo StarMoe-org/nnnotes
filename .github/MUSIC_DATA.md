@@ -40,12 +40,17 @@ The scheduled [run 36699637364](https://github.com/StarMoe-org/nnnotes/actions/r
 chart `Live/MusicScore/0109/0109_00` (score ID 10010900). Main `c5f39f8` already fixes the shared catalog selector
 to use the frozen master resource version; this change does not repeat that fix or silently drop missing songs.
 A single force/dry-run [36817548100](https://github.com/StarMoe-org/nnnotes/actions/runs/36817548100) validates
-that main revision separately. It is not a production publish or a run of this Draft's new matrix.
+that main revision separately. It is not a production publish or a run of the region matrix added by
+[PR #7](https://github.com/StarMoe-org/nnnotes/pull/7).
 
 [The source audit](music-data-refresh-audit.json) records the public TW file and saved JP snapshot, their hashes,
 the two sentinel songs (青春コンプレックス and Ave Mujica), and all 85 songs' passing raw threshold checks in
-each snapshot. The screenshot's first threshold set matches published TW; the second matches saved JP solo
-thresholds. This is not evidence of a same-region latest bug fix. The correct JP Version query failed with
+each saved snapshot. The screenshot's first threshold set matches published TW; the second initially matched
+saved JP solo thresholds. A subsequent [SHA-verified TW master comparison](latest-tw-sentinel-diff.json) observes
+master `74639bc3f98486a22b1232f232213def`: 86 songs, including new song 100109, and changed solo/room thresholds
+for both sentinel songs. The new TW solo values also match the second screenshot. Their song and difficulty
+master rows are unchanged; chart asset bytes were not compared. This verifies source parameter updates, not
+the mechanism of a game bug fix or native score semantics. The correct JP Version query failed with
 `UNAVAILABLE`; no latest JP observation or fresh JP native certification is claimed.
 
 Rank/reward threshold changes are master **parameters**: the hash identity schedules a refresh and the source
@@ -108,6 +113,12 @@ Turn it on (`gh variable set MUSIC_DATA_PUBLISH --body true`) once the published
 nothing being published, `plan` finds no `build.json` and every run builds.
 
 ## Gates
+
+The replay inventory also accepts `manifest.snapLabels` (`nnnotes.replay-labels/1`). Its SHA/size, region,
+master version and all 13 served-table hashes must match the checked music-data provenance. It is uploaded and
+read back as an independent payload before the replay manifest and data pointer. Older manifests without labels
+continue to work. Full decoded labels are in the resource tree, not the compact music-data file or CI reports;
+they contain no server configuration, credentials or score formula. See [replay metadata](../docs/replay.md).
 
 Every one must pass, else nothing is published. Warnings go to the job summary and `build.json` and do not stop it.
 

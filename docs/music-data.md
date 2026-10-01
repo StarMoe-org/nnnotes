@@ -453,4 +453,8 @@ their facts here) and the `nnnotes.deck-data/1` file of `nnnotes deck-data` (its
 
 Final aptitude exports require the standard-error target for both `score` and `scorePerfect`, each against its own paired no-skill baseline. Sampling extends the same published seed prefix through geometric batches, stopping as soon as both targets agree with the unchanged max(1% of increment, 0.1% of baseline) rule. The 65,536-seed cap is a failure guard, not a requirement to run every seed. An unmet cap aborts a normal export before writing artifacts. `--allow-unconverged-aptitude` is an explicit diagnostic option; it retains real SE values and unmet flags.
 
-`--replay-dir OUT/replay --replay-engine WASM_PKG` writes normalized runtime inputs and pinned WASM assets as described in [replay.md](replay.md). The music data stays compact and carries the SHA-bound `replay.manifestUrl` pointer. No original chart/master blobs or native binary are included in this artifact bundle.
+`--replay-dir OUT/replay --replay-engine WASM_PKG` writes normalized runtime inputs, pinned WASM assets and same-snapshot
+Snap label/reference-card metadata as described in [replay.md](replay.md). The music data stays compact and carries
+the SHA-bound `replay.manifestUrl` pointer; its manifest optionally references `snap-labels.json`. The selected
+decoded label tables retain names/templates, original per-level effects and artwork IDs. No encrypted master/chart
+blobs or native binary are included in this artifact bundle. Label metadata does not change the score model.
