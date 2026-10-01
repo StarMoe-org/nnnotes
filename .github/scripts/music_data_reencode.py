@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import http_compression
@@ -87,7 +88,7 @@ def reencode(out: Path, dry_run=False) -> dict:
         current()
         report["probe"] = {"key": probe_key, **http_compression.verify_object(
             http_compression.get_object(md.public_url(probe_key)), md.sha256(probe_raw), compressed_json=True)}
-    for path in unique:
+    def encode(path):
         key = path.relative_to(root).as_posix()
         raw = path.read_bytes()
         _, transport = http_compression.encode_json(raw)
@@ -101,7 +102,11 @@ def reencode(out: Path, dry_run=False) -> dict:
             # Independently verify the externally served Content-Encoding, Content-Type and encoded/decoded identities.
             verified = http_compression.verify_object(http_compression.get_object(md.public_url(key)), md.sha256(raw), compressed_json=True)
             require(verified == transport["Metadata"], f"public transport differs from deterministic upload: {key}")
-        report["objects"].append(facts)
+        return facts
+    # JSON payloads can be verified in parallel; manifest, document and marker remain the final barriers.
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        report["objects"] = list(workers.map(encode, unique[:-3]))
+    report["objects"].extend(encode(path) for path in unique[-3:])
     current()
     report["decodedBytes"] = sum(int(item["decoded-bytes"]) for item in report["objects"])
     report["encodedBytes"] = sum(int(item["encoded-bytes"]) for item in report["objects"])
