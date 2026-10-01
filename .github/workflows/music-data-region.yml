@@ -68,7 +68,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:
@@ -142,6 +142,7 @@ jobs:
         run: python .github/scripts/music_data.py build "$WORK/out"
 
       - name: Gates
+        id: gates
         run: python .github/scripts/music_data.py check "$WORK/out" "$WORK/master" "$WORK/page/examples/songs"
 
       - name: Publish
@@ -163,3 +164,16 @@ jobs:
             ${{ env.WORK }}/out/check.json
             ${{ env.WORK }}/out/build.json
             ${{ env.WORK }}/out/jp-preflight.json
+      - name: Preserve validated publication payloads for retry
+        if: always() && steps.gates.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: music-data-validated-payload-${{ inputs.region }}
+          retention-days: 3
+          if-no-files-found: error
+          path: |
+            ${{ env.WORK }}/out/music-data.json
+            ${{ env.WORK }}/out/replay
+            ${{ env.WORK }}/out/jackets
+            ${{ env.WORK }}/out/check.json
+            ${{ env.WORK }}/out/build.json

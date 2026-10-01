@@ -639,6 +639,12 @@ class FakeS3:
     def get_object(self, Bucket, Key):
         return {"Body": io.BytesIO(self.store[Key]), **self.headers.get(Key, {})}
 
+    def head_object(self, Bucket, Key):
+        from botocore.exceptions import ClientError
+        if Key not in self.store:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "HeadObject")
+        return {"ContentLength": len(self.store[Key])}
+
 
 class FakeBucket:
     name, prefix, writable = "moenotes", "music-data/", True
@@ -646,8 +652,9 @@ class FakeBucket:
     def __init__(self, s3):
         self.s3 = s3
 
-    def keys(self, sub=""):
-        return {k[len(self.prefix):]: len(v) for k, v in self.s3.store.items() if k.startswith(self.prefix + sub)}
+    def object_size(self, key):
+        raw = self.s3.store.get(self.prefix + key)
+        return len(raw) if raw is not None else None
 
 
 def published_out(tmp_path, monkeypatch, s3):

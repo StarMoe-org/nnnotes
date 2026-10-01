@@ -1461,15 +1461,15 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     if not b.writable and not dry_run:
         fail("publish needs STORY_S3_ACCESS_KEY and STORY_S3_SECRET_KEY")
     force = os.environ.get("FORCE") == "true"
+    jackets = sorted((o / "jackets").glob("*.webp"))
     try:
-        have = b.keys(JACKETS)
-        archived = b.keys(marker["archive"]).get(marker["archive"]) == len(http_compression.encode_json(raw)[0])
+        have = {JACKETS + jacket.name: b.object_size(JACKETS + jacket.name) for jacket in jackets}
+        archived = b.object_size(marker["archive"]) == len(http_compression.encode_json(raw)[0])
     except Exception as e:                           # a dry run without a key where the bucket lists to none
         if not dry_run:
             raise
         print(f"cannot list the bucket ({type(e).__name__}): the dry run lists every object", flush=True)
         have, archived = {}, False
-    jackets = sorted((o / "jackets").glob("*.webp"))
     new = [j for j in jackets if force or have.get(JACKETS + j.name) != j.stat().st_size]
     steps = [(JACKETS + j.name, j, JACKET_CACHE, False) for j in new]
     if not archived:

@@ -25,6 +25,17 @@ def test_json_transport_keeps_the_manifest_hash_and_has_deterministic_stored_ide
     assert facts["decoded-sha256"] == md.sha256(raw)
 
 
+def test_publisher_uses_the_real_bucket_contract_instead_of_a_fake_listing_api(tmp_path, monkeypatch):
+    s3 = FakeS3(); out, _ = published_out(tmp_path, monkeypatch, s3)
+    bucket = story_site.Bucket.__new__(story_site.Bucket)
+    bucket.name, bucket.prefix, bucket.writable, bucket.s3 = "moenotes", "music-data/", True, s3
+    assert not hasattr(bucket, "keys")
+    monkeypatch.setattr(md, "bucket", lambda: bucket)
+    md.cmd_publish(str(out))
+    assert "music-data/music-data.json" in s3.store and "music-data/build.json" in s3.store
+    assert bucket.object_size("music-data.json") == len(s3.store["music-data/music-data.json"])
+
+
 @pytest.mark.parametrize("defect", ["missing-encoding", "wrong-type", "wrong-size", "wrong-stored-sha", "wrong-decoded-sha", "corrupt-body"])
 def test_wrong_encoding_or_either_identity_is_rejected(defect):
     raw = b'{"test":true}'; body, extra = transport.encode_json(raw)
