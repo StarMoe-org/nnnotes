@@ -208,3 +208,10 @@ Repository variables:
   WebP bytes depend on the Pillow version.
 - **Logs.** The steps print counts, ids, SHA-256 and field names, not game content; nothing decrypted is cached or
   uploaded as an artifact.
+# HTTP compression
+
+Normal and validated-prebuilt publication uploads every JSON object at its existing `.json` URL with `Content-Type: application/json` and `Content-Encoding: gzip`. Compression uses gzip level 6 and `mtime=0`; engine JavaScript, WASM and images remain unchanged. Manifest SHA-256 values and byte counts always describe the decoded payload consumed by browser `fetch`. S3 metadata records `decoded-sha256`, `decoded-bytes`, `encoded-sha256` and `encoded-bytes` separately. Read-back gates verify both stored identity and decoded identity before advancing pointers. Python public-source reads explicitly decode the HTTP content encoding.
+
+To re-encode an already published, verified snapshot without running Rust or generating a replacement model, dispatch `music-data.yml` with `reencode_only=true`, the target `region`, and `dry_run=false`. This path shares the normal/prebuilt region lock. It requires the current source identity, an unchanged published build marker, all gate attestations, the complete SHA-bound replay runtime and all 13 Snap label tables. It checks source and marker again before each read/write, first verifies the store/CDN using a fresh gzip probe, then re-encodes the JSON payloads and externally verifies headers, stored identity and decoded identity. Manifest, music-data and build-marker decoded bytes never change. The encoding report records every object and total encoded/decoded size; it contains no game payloads or credentials.
+
+JP builds perform an actual CDN-authentication preflight before Rust/WASM allocation. A refused `Version` call remains a failed JP update; it cannot substitute another region or bypass authenticated snapshot checks. Report artifacts use canonical workspace paths so `upload-artifact@v7` can retain diagnostics.

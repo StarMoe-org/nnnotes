@@ -624,14 +624,20 @@ def test_real_aptitude_deck_sample():
 # ---------------------------------------------------------------- publish (a stand-in bucket)
 class FakeS3:
     def __init__(self, corrupt=None):
-        self.store, self.log, self.corrupt = {}, [], corrupt
+        self.store, self.log, self.corrupt, self.headers = {}, [], corrupt, {}
 
     def upload_file(self, src, bucket, key, ExtraArgs):
         self.store[key] = b"not it" if key == self.corrupt else Path(src).read_bytes()
+        self.headers[key] = ExtraArgs
+        self.log.append((key, ExtraArgs["CacheControl"], ExtraArgs["ContentType"]))
+
+    def upload_fileobj(self, stream, bucket, key, ExtraArgs):
+        self.store[key] = b"not it" if key == self.corrupt else stream.read()
+        self.headers[key] = ExtraArgs
         self.log.append((key, ExtraArgs["CacheControl"], ExtraArgs["ContentType"]))
 
     def get_object(self, Bucket, Key):
-        return {"Body": io.BytesIO(self.store[Key])}
+        return {"Body": io.BytesIO(self.store[Key]), **self.headers.get(Key, {})}
 
 
 class FakeBucket:
@@ -675,7 +681,8 @@ def test_publish_order_and_read_back(tmp_path, monkeypatch):
     assert keys[2:] == [archive, "music-data/music-data.json", "music-data/build.json"]
     caches = {k: c for k, c, _ in s3.log}
     assert caches[archive].endswith("immutable") and caches["music-data/music-data.json"] == "no-cache"
-    assert s3.store["music-data/music-data.json"] == (out / "music-data.json").read_bytes()
+    assert music_data.http_compression.decode_content(s3.store["music-data/music-data.json"], "gzip") == (out / "music-data.json").read_bytes()
+    assert s3.headers["music-data/music-data.json"]["ContentEncoding"] == "gzip"
     s3.log.clear()
     music_data.cmd_publish(str(out))                          # again: the jackets and the archive copy are there
     assert [k for k, _, _ in s3.log] == ["music-data/music-data.json", "music-data/build.json"]
@@ -692,6 +699,7 @@ def test_publish_stops_before_the_marker_when_the_file_does_not_read_back(tmp_pa
     def offline(*a, **kw):
         raise music_data.urllib.error.URLError("offline")
     monkeypatch.setattr(music_data, "get", offline)
+    monkeypatch.setattr(music_data.http_compression, "get_object", offline)
     with pytest.raises(SystemExit, match="music-data.json: the bucket does not serve what was uploaded"):
         music_data.cmd_publish(str(out))
     assert "music-data/build.json" not in s3.store
@@ -851,6 +859,7 @@ def test_replay_read_back_failure_stops_before_runtime_pointer(tmp_path, monkeyp
     out, _ = published_out(tmp_path, monkeypatch, s3)
     replay_out(out)
     monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
+    monkeypatch.setattr(music_data.http_compression, "get_object", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
     with pytest.raises(SystemExit, match="does not serve what was uploaded"):
         music_data.cmd_publish(str(out))
     assert "music-data/replay/manifest.json" not in s3.store
@@ -871,6 +880,7 @@ def test_parallel_payload_readbacks_finish_before_any_pointer(tmp_path, monkeypa
         key = archive if corrupt == "archive" else "replay/engine/ournotes_replay_bg.wasm"
         s3.corrupt = "music-data/" + key
         monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
+        monkeypatch.setattr(music_data.http_compression, "get_object", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
     original = music_data.read_back
     pair, lock, verified, started = threading.Barrier(2), threading.Lock(), set(), []
     def read_back(b, key, digest):

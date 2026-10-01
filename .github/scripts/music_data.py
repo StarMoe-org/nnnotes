@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -44,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import story_site                                   # noqa: E402  (the bucket, HTTP and master data helpers)
+import http_compression                             # noqa: E402
 from story_site import env, get, output, summary   # noqa: E402
 
 FORMAT = "nnnotes.music-data/1"
@@ -227,6 +229,26 @@ def cmd_regions() -> None:
         os.environ.get("GITHUB_EVENT_NAME", ""), payload, os.environ.get("REQUESTED_REGION", ""))
     output("regions", json.dumps(selected))
     output("count", str(len(selected)))
+
+
+def cmd_jp_check() -> None:
+    """Check the actual JP credential path before allocating Rust/WASM build work."""
+    if env("MASTERDATA_REGION") != "jp":
+        fail("JP preflight requires the JP region")
+    story_site.configure_region()
+    from nnnotes.config import Config
+    from nnnotes.jp import Session
+    from nnnotes.gameapi import GameApiError
+    try:
+        observation = Session(Config.load(), "jp").observe(timeout=30)
+    except GameApiError as error:
+        fail(f"JP CDN authentication preflight failed: {error}")
+    expected = (story_site.build_snapshot().get("entry") or {})
+    if (observation.version.version != expected.get("version") or observation.source is None
+            or observation.source.version != expected.get("resource_version")
+            or observation.source.hash != expected.get("resource_hash")):
+        fail("JP Version assets differ from the decoded snapshot; refresh master data before building")
+    summary("- JP CDN authentication preflight passed for the current decoded snapshot")
 
 
 def short(v) -> str:
@@ -1377,23 +1399,29 @@ def upload(b, key: str, src: Path, cache: str) -> None:
     types = {".wasm":"application/wasm", ".js":"text/javascript"}
     extra = {"ContentType": types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream")),
              "CacheControl": cache}
-    b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
+    if src.suffix.lower() == ".json":
+        encoded, transport = http_compression.encode_json(src.read_bytes())
+        b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
+    else:
+        b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
 
 
 def read_back(b, key: str, digest: str) -> None:
-    """The object as stored (S3 GET), else as served (plain HTTP), must have the SHA-256 uploaded."""
+    """Verify stored encoding/metadata and decoded SHA before advancing a public pointer."""
     for attempt in range(4):
         try:
-            if sha256(b.s3.get_object(Bucket=b.name, Key=b.prefix + key)["Body"].read()) == digest:
-                return
+            http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest,
+                                           compressed_json=key.lower().endswith(".json"))
+            return
         except Exception as e:                       # Cloudflare in front of the store rejects a signed GET at times
             print(f"read back {key}: {type(e).__name__}", flush=True)
         time.sleep(3 * (attempt + 1))
     try:
-        if sha256(get(public_url(key), timeout=300)) == digest:
-            return
-    except urllib.error.URLError as e:
-        print(f"read back {key} over HTTP: {e}", flush=True)
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
+                                       compressed_json=key.lower().endswith(".json"))
+        return
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     fail(f"{key}: the bucket does not serve what was uploaded (SHA-256 {digest[:12]})")
 
 
@@ -1424,7 +1452,7 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     force = os.environ.get("FORCE") == "true"
     try:
         have = b.keys(JACKETS)
-        archived = b.keys(marker["archive"]).get(marker["archive"]) == len(raw)
+        archived = b.keys(marker["archive"]).get(marker["archive"]) == len(http_compression.encode_json(raw)[0])
     except Exception as e:                           # a dry run without a key where the bucket lists to none
         if not dry_run:
             raise
@@ -1468,6 +1496,8 @@ def main(argv: list[str]) -> None:
     cmd, args = argv[0], argv[1:]
     if cmd == "regions" and not args:
         cmd_regions()
+    elif cmd == "jp-check" and not args:
+        cmd_jp_check()
     elif cmd == "plan" and not args:
         cmd_plan()
     elif cmd == "master" and len(args) == 1:
