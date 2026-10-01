@@ -668,6 +668,8 @@ def published_out(tmp_path, monkeypatch, s3):
                                                 "archive": f"archive/v-test/{report['sha256']}.json"}),
                                     encoding="utf-8")
     monkeypatch.setattr(music_data, "bucket", lambda: FakeBucket(s3))
+    monkeypatch.setattr(music_data.http_compression, "get_object",
+                        lambda url, **kw: s3.get_object(Bucket="moenotes", Key="music-data/" + url.split("/music-data/", 1)[1]))
     monkeypatch.setattr(music_data.time, "sleep", lambda s: None)
     monkeypatch.setenv("STORY_S3_ENDPOINT", "https://storage.example")
     monkeypatch.setenv("STORY_S3_BUCKET", "moenotes")

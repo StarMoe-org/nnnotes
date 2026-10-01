@@ -29,6 +29,39 @@ def test_json_transport_keeps_the_manifest_hash_and_has_deterministic_stored_ide
     assert facts["decoded-sha256"] == md.sha256(raw)
 
 
+def test_complete_public_http_contract_avoids_unprovable_sdk_retries(tmp_path, monkeypatch):
+    monkeypatch.setattr(md, "public_url", lambda key: "https://example.test/" + key)
+    raw = b'{"published":true}'
+    path = tmp_path / "data.json"; path.write_bytes(raw)
+    s3 = FakeS3(); bucket = FakeBucket(s3); md.upload(bucket, "data.json", path, "no-cache")
+    public_get = s3.get_object
+    monkeypatch.setattr(transport, "get_object", lambda *a, **kw: public_get(Bucket=bucket.name, Key=bucket.prefix + "data.json"))
+    def unnecessary(*a, **kw): raise AssertionError("verified public identity must not retry an SDK response")
+    monkeypatch.setattr(s3, "get_object", unnecessary)
+    monkeypatch.setattr(md.time, "sleep", unnecessary)
+    md.read_back(bucket, "data.json", md.sha256(raw))
+
+
+@pytest.mark.parametrize("sdk_valid", [True, False])
+def test_incomplete_public_encoding_contract_still_requires_full_sdk_identity(tmp_path, monkeypatch, sdk_valid):
+    monkeypatch.setattr(md, "public_url", lambda key: "https://example.test/" + key)
+    raw = b'{"published":true}'
+    path = tmp_path / "data.json"; path.write_bytes(raw)
+    s3 = FakeS3(); bucket = FakeBucket(s3); md.upload(bucket, "data.json", path, "no-cache")
+    def incomplete(*a, **kw):
+        obj = s3.get_object(Bucket=bucket.name, Key=bucket.prefix + "data.json")
+        obj.pop("ContentEncoding")
+        return obj
+    monkeypatch.setattr(transport, "get_object", incomplete)
+    monkeypatch.setattr(md.time, "sleep", lambda *a: None)
+    if not sdk_valid:
+        s3.headers[bucket.prefix + "data.json"]["Metadata"]["encoded-sha256"] = "a" * 64
+        with pytest.raises(SystemExit, match="does not serve what was uploaded"):
+            md.read_back(bucket, "data.json", md.sha256(raw))
+    else:
+        md.read_back(bucket, "data.json", md.sha256(raw))
+
+
 def test_publisher_uses_the_real_bucket_contract_instead_of_a_fake_listing_api(tmp_path, monkeypatch):
     s3 = FakeS3(); out, _ = published_out(tmp_path, monkeypatch, s3)
     bucket = story_site.Bucket.__new__(story_site.Bucket)

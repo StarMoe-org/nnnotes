@@ -1422,17 +1422,26 @@ def upload(b, key: str, src: Path, cache: str) -> None:
 
 def read_back(b, key: str, digest: str) -> None:
     """Verify stored encoding/metadata and decoded SHA before advancing a public pointer."""
+    compressed_json = key.lower().endswith(".json")
+    try:
+        # This is the consumer's actual response, with the same complete transport contract.
+        # Some signed SDK responses fail this contract; retrying them need not delay a valid public response.
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
+                                       compressed_json=compressed_json)
+        return
+    except (urllib.error.URLError, ValueError, OSError) as e:
+        print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     for attempt in range(4):
         try:
             http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest,
-                                           compressed_json=key.lower().endswith(".json"))
+                                           compressed_json=compressed_json)
             return
         except Exception as e:                       # Cloudflare in front of the store rejects a signed GET at times
             print(f"read back {key}: {type(e).__name__}", flush=True)
         time.sleep(3 * (attempt + 1))
     try:
         http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
-                                       compressed_json=key.lower().endswith(".json"))
+                                       compressed_json=compressed_json)
         return
     except (urllib.error.URLError, ValueError, OSError) as e:
         print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
