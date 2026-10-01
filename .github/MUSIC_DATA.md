@@ -4,7 +4,9 @@ The daily workflow checks **TW and JP independently** by default (`MUSIC_DATA_RE
 checks the affected enabled regions; an older dispatch without a region list checks both. A manual run can select
 one region. The matrix has `fail-fast: false`, so an unavailable JP source does not cancel TW. Each region calls
 `music-data-region.yml` with its package, catalog, client and output prefix: TW `music-data`, JP `jp/music-data`.
-The previous global `MUSIC_DATA_MASTERDATA_REGION` selector is no longer used. See [Japanese release](../docs/jp.md)
+The previous global `MUSIC_DATA_MASTERDATA_REGION` no longer selects which regions run; it only preserves ownership
+of a legacy `MUSIC_DATA_S3_PREFIX` (JP-owned prefixes remain JP). Both normal and prebuilt reject equal effective
+TW/JP prefixes before publication, including slash-normalized duplicates. See [Japanese release](../docs/jp.md)
 for setup and validation limits; enabling the matrix does not certify a new client model or guarantee JP availability.
 
 International builds also pin the catalog to the downloaded master snapshot: its `resource_version` selects
@@ -189,9 +191,8 @@ Repository variables:
 - **Versions.** A new ournotes-deck pin (`rust/Cargo.toml`, `rust/Cargo.lock`) or a new nnnotes commit in `src/`,
   `rust/` or `pyproject.toml` reaches this fork with a sync, and the next run builds a new file. The deck
   statistics may then differ: `provenance.deck.commit` and `build.json` name the commit.
-- **The page and the data.** The page's modules are pinned by `MUSIC_DATA_PLAYER_REF`: after a page release that
-  reads new fields, move it (a new ref alone does not start a build; run with `force` to check the published data
-  against the new page).
+- **The page and the data.** The page's modules are pinned by `MUSIC_DATA_PLAYER_REF`: changing that pin or its
+  repository is now a build input and starts a new check. Use an immutable commit to keep the consumer identity stable.
 - **Byte identity.** A build from the same inputs gives the same bytes (the file is canonical); the jackets'
   WebP bytes depend on the Pillow version.
 - **Logs.** The steps print counts, ids, SHA-256 and field names, not game content; nothing decrypted is cached or

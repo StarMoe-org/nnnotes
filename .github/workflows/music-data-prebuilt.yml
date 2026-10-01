@@ -39,7 +39,10 @@ concurrency:
 env:
   STORY_S3_ENDPOINT: ${{ vars.STORY_S3_ENDPOINT || 'https://storage.bdon.moe' }}
   STORY_S3_BUCKET: ${{ vars.STORY_S3_BUCKET || 'moenotes' }}
-  MUSIC_DATA_S3_PREFIX: ${{ inputs.region == 'jp' && (vars.MUSIC_DATA_JP_S3_PREFIX || 'jp/music-data') || (vars.MUSIC_DATA_TW_S3_PREFIX || vars.MUSIC_DATA_S3_PREFIX || 'music-data') }}
+  # The legacy region determines only ownership of its old prefix, never which matrix regions run.
+  MUSIC_DATA_S3_PREFIX: ${{ inputs.region == 'jp' && (vars.MUSIC_DATA_JP_S3_PREFIX || (vars.MUSIC_DATA_MASTERDATA_REGION == 'jp' && vars.MUSIC_DATA_S3_PREFIX) || 'jp/music-data') || (vars.MUSIC_DATA_TW_S3_PREFIX || (vars.MUSIC_DATA_MASTERDATA_REGION != 'jp' && vars.MUSIC_DATA_S3_PREFIX) || 'music-data') }}
+  MUSIC_DATA_TW_PREFIX_CHECK: ${{ vars.MUSIC_DATA_TW_S3_PREFIX || (vars.MUSIC_DATA_MASTERDATA_REGION != 'jp' && vars.MUSIC_DATA_S3_PREFIX) || 'music-data' }}
+  MUSIC_DATA_JP_PREFIX_CHECK: ${{ vars.MUSIC_DATA_JP_S3_PREFIX || (vars.MUSIC_DATA_MASTERDATA_REGION == 'jp' && vars.MUSIC_DATA_S3_PREFIX) || 'jp/music-data' }}
   MUSIC_DATA_PUBLISH: ${{ vars.MUSIC_DATA_PUBLISH || 'false' }}
   MASTERDATA_BASE_URL: ${{ vars.MASTERDATA_BASE_URL || 'https://metadata.bdon.moe' }}
   MASTERDATA_REGION: ${{ inputs.region }}

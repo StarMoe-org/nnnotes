@@ -134,9 +134,37 @@ def test_workflows_isolate_regions_and_share_publication_lock():
     assert "group: music-data-${{ matrix.region }}" in wrapper
     assert "group: music-data-${{ inputs.region }}" in prebuilt
     for workflow in (normal, prebuilt):
-        assert "MUSIC_DATA_JP_S3_PREFIX || 'jp/music-data'" in workflow
-        assert "MUSIC_DATA_TW_S3_PREFIX || vars.MUSIC_DATA_S3_PREFIX || 'music-data'" in workflow
+        assert "MUSIC_DATA_MASTERDATA_REGION == 'jp' && vars.MUSIC_DATA_S3_PREFIX" in workflow
+        assert "MUSIC_DATA_MASTERDATA_REGION != 'jp' && vars.MUSIC_DATA_S3_PREFIX" in workflow
         assert "MASTERDATA_REGION: ${{ inputs.region }}" in workflow
-        assert "MUSIC_DATA_MASTERDATA_REGION" not in workflow
+        assert "MUSIC_DATA_TW_PREFIX_CHECK:" in workflow
+        assert "MUSIC_DATA_JP_PREFIX_CHECK:" in workflow
         test_step = workflow[workflow.index("Gate self-test"):]
         assert "test_music_data_refresh.py" in test_step.split("- name:", 1)[0]
+
+
+@pytest.mark.parametrize("tw,jp", [("jp/music-data", "jp/music-data"),
+    ("/jp/music-data/", "jp/music-data")])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_colliding_legacy_region_prefixes_never_publish(tmp_path, monkeypatch, tw, jp, dry_run):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    monkeypatch.setenv("MUSIC_DATA_TW_PREFIX_CHECK", tw)
+    monkeypatch.setenv("MUSIC_DATA_JP_PREFIX_CHECK", jp)
+    with pytest.raises(SystemExit, match="prefixes must be distinct"):
+        music_data.cmd_publish(str(out), dry_run=dry_run)
+    assert not s3.store
+
+
+def test_distinct_region_prefixes_keep_existing_destinations(monkeypatch):
+    monkeypatch.setenv("MUSIC_DATA_TW_PREFIX_CHECK", "/music-data/")
+    monkeypatch.setenv("MUSIC_DATA_JP_PREFIX_CHECK", "jp/music-data/")
+    music_data.require_distinct_region_prefixes()
+
+
+def test_prefix_collision_stops_plan_before_source_download(monkeypatch):
+    monkeypatch.setenv("MUSIC_DATA_TW_PREFIX_CHECK", "jp/music-data")
+    monkeypatch.setenv("MUSIC_DATA_JP_PREFIX_CHECK", "jp/music-data")
+    monkeypatch.setattr(music_data.story_site, "master_index", lambda: pytest.fail("source should not be read"))
+    with pytest.raises(SystemExit, match="prefixes must be distinct"):
+        music_data.cmd_plan()

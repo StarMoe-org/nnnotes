@@ -98,6 +98,16 @@ def s3_prefix() -> str:
     return f"{p}/" if p else ""
 
 
+def require_distinct_region_prefixes() -> None:
+    """Reject a legacy/custom configuration that lets independent region writers share one directory."""
+    tw = os.environ.get("MUSIC_DATA_TW_PREFIX_CHECK")
+    jp = os.environ.get("MUSIC_DATA_JP_PREFIX_CHECK")
+    if tw is None and jp is None:
+        return  # A standalone one-region CLI has no second configured writer.
+    if tw is None or jp is None or tw.strip("/") == jp.strip("/"):
+        fail("TW and JP output prefixes must be distinct; migrate MUSIC_DATA_S3_PREFIX to region-specific prefixes")
+
+
 def bucket() -> "story_site.Bucket":
     b = story_site.Bucket()
     b.prefix = s3_prefix()
@@ -222,6 +232,7 @@ def short(v) -> str:
 
 # ---------------------------------------------------------------- plan
 def cmd_plan() -> None:
+    require_distinct_region_prefixes()
     _, region = story_site.master_index()
     require_decoded_master()
     now = inputs(region.get("entry") or {}, files=region["files"])
@@ -1374,6 +1385,7 @@ def publishing() -> bool:
 
 
 def cmd_publish(out: str, dry_run: bool = False) -> None:
+    require_distinct_region_prefixes()
     if not publishing() and not dry_run:
         summary("- publishing is off (the repository variable MUSIC_DATA_PUBLISH is not `true`): a dry run")
         dry_run = True
