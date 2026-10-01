@@ -1,11 +1,16 @@
 # DRAFT: install as .github/workflows/music-data-prebuilt.yml only after review.
 # Copy the prebuilt_publish*.py/mjs helpers into .github/scripts too.
-# Daily music-data.yml is unchanged; this path skips only already completed build.
+# This path skips only the already completed build and uses the same region lock.
 name: Music data (validated prebuilt)
 
 on:
   workflow_dispatch:
     inputs:
+      region:
+        description: Region of the verified bundle (never substitute another region)
+        type: choice
+        options: [hk-tw-mo, jp]
+        default: hk-tw-mo
       release_id:
         description: Same-repository draft release ID containing the final bundle and .sha256
         type: string
@@ -28,18 +33,18 @@ permissions:
   contents: write
 
 concurrency:
-  group: music-data
+  group: music-data-${{ inputs.region }}
   cancel-in-progress: false
 
 env:
   STORY_S3_ENDPOINT: ${{ vars.STORY_S3_ENDPOINT || 'https://storage.bdon.moe' }}
   STORY_S3_BUCKET: ${{ vars.STORY_S3_BUCKET || 'moenotes' }}
-  MUSIC_DATA_S3_PREFIX: ${{ vars.MUSIC_DATA_S3_PREFIX || 'music-data' }}
+  MUSIC_DATA_S3_PREFIX: ${{ inputs.region == 'jp' && (vars.MUSIC_DATA_JP_S3_PREFIX || 'jp/music-data') || (vars.MUSIC_DATA_TW_S3_PREFIX || vars.MUSIC_DATA_S3_PREFIX || 'music-data') }}
   MUSIC_DATA_PUBLISH: ${{ vars.MUSIC_DATA_PUBLISH || 'false' }}
   MASTERDATA_BASE_URL: ${{ vars.MASTERDATA_BASE_URL || 'https://metadata.bdon.moe' }}
-  MASTERDATA_REGION: ${{ vars.MUSIC_DATA_MASTERDATA_REGION || 'hk-tw-mo' }}
-  NNNOTES_CATALOG_REGION: tw
-  NNNOTES_CATALOG_LANGUAGE: zh-Hant
+  MASTERDATA_REGION: ${{ inputs.region }}
+  NNNOTES_CATALOG_REGION: ${{ inputs.region == 'jp' && 'jp' || 'tw' }}
+  NNNOTES_CATALOG_LANGUAGE: ${{ inputs.region == 'jp' && 'ja' || 'zh-Hant' }}
   WORK: ${{ github.workspace }}/prebuilt-work
 
 jobs:
@@ -105,7 +110,7 @@ jobs:
         env:
           MUSIC_DATA_PAGE: ${{ env.WORK }}/page/examples/songs
         working-directory: producer
-        run: python -m pytest -q -p no:cacheprovider "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data.py"
+        run: python -m pytest -q -p no:cacheprovider "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_jp_workflow.py" "$GITHUB_WORKSPACE/publisher/.github/scripts/test_music_data_refresh.py"
       - name: Genuine current API master snapshot (unchanged)
         working-directory: producer
         run: python "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" master "$WORK/master"

@@ -1,0 +1,240 @@
+{
+  "collectedAt": "2026-10-01",
+  "scope": "Saved snapshots, not a successful latest JP Version observation",
+  "samples": [
+    {
+      "label": "published-tw",
+      "musicDataSha256": "983896151d3ed69d9dfe26044225907e33be037e4b74589e110ded64780f8738",
+      "provenance": {
+        "region": "tw",
+        "client": {
+          "versionName": "1.0.1",
+          "versionCode": 25
+        },
+        "exporter": {
+          "name": "nnnotes",
+          "version": "0.1.2",
+          "chartFormat": "nnnotes.live-score/1"
+        },
+        "deck": {
+          "name": "ournotes-deck",
+          "version": "0.0.1",
+          "source": "https://github.com/empty-sekai/ournotes-deck",
+          "commit": "dbd9cf01a4854808dceb6aedcd4041af372faeee",
+          "format": "ournotes-deck.chart-stats/2"
+        }
+      },
+      "masterVersion": "0b21c9f4a3911370d5f981fb894c7544",
+      "sourceTables": {
+        "MasterLiveMusic": "aa90a155929adb631a6842a2ec86aaf748276d6186ac994a693e6d9a9b848185",
+        "MasterLiveScoreRank": "434d44477c5d1fb630b530c34f11014b7b38c9feabef037b1cc54ac82b8e5291"
+      },
+      "sourceRankGate": {
+        "passed": true,
+        "failures": [],
+        "note": "85 songs: requiredScore and battleRequiredScore checked separately; no derived power"
+      },
+      "sentinels": [
+        {
+          "id": 100021,
+          "title": "青春コンプレックス",
+          "scoreRanks": [
+            {
+              "rank": "D",
+              "requiredScore": 0,
+              "battleRequiredScore": 0
+            },
+            {
+              "rank": "C",
+              "requiredScore": 415687,
+              "battleRequiredScore": 415687
+            },
+            {
+              "rank": "B",
+              "requiredScore": 1204973,
+              "battleRequiredScore": 1204973
+            },
+            {
+              "rank": "A",
+              "requiredScore": 3429867,
+              "battleRequiredScore": 3429867
+            },
+            {
+              "rank": "S",
+              "requiredScore": 4638937,
+              "battleRequiredScore": 4638937
+            },
+            {
+              "rank": "SS",
+              "requiredScore": 5637904,
+              "battleRequiredScore": 5637904
+            }
+          ]
+        },
+        {
+          "id": 100026,
+          "title": "Ave Mujica",
+          "scoreRanks": [
+            {
+              "rank": "D",
+              "requiredScore": 0,
+              "battleRequiredScore": 0
+            },
+            {
+              "rank": "C",
+              "requiredScore": 432065,
+              "battleRequiredScore": 432065
+            },
+            {
+              "rank": "B",
+              "requiredScore": 1174499,
+              "battleRequiredScore": 1174499
+            },
+            {
+              "rank": "A",
+              "requiredScore": 3210324,
+              "battleRequiredScore": 3210324
+            },
+            {
+              "rank": "S",
+              "requiredScore": 4318471,
+              "battleRequiredScore": 4318471
+            },
+            {
+              "rank": "SS",
+              "requiredScore": 5660978,
+              "battleRequiredScore": 5660978
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "saved-jp",
+      "musicDataSha256": "3218bfb65d56e8d870965fe082d7edb6aa1d2dee068776b0d24e07b3229149c5",
+      "provenance": {
+        "region": "jp",
+        "client": {
+          "versionName": "1.0.4",
+          "versionCode": 10053
+        },
+        "exporter": {
+          "name": "nnnotes",
+          "version": "0.1.2",
+          "chartFormat": "nnnotes.live-score/1"
+        },
+        "deck": null
+      },
+      "masterVersion": "1.0.0.300/52355a9de56a475f691b10ef58acba58",
+      "sourceTables": {
+        "MasterLiveMusic": "071b409c238711630d7c374cad802966861b054b5ecdea397869e4a40da6d1f2",
+        "MasterLiveScoreRank": "0acb47cb91c7fdc8d45dd79d5c1d688e9bf67d75e2ce5b60682318c7592c0a51"
+      },
+      "sourceRankGate": {
+        "passed": true,
+        "failures": [],
+        "note": "85 songs: requiredScore and battleRequiredScore checked separately; no derived power"
+      },
+      "sentinels": [
+        {
+          "id": 100021,
+          "title": "青春コンプレックス",
+          "scoreRanks": [
+            {
+              "rank": "D",
+              "requiredScore": 0,
+              "battleRequiredScore": 0
+            },
+            {
+              "rank": "C",
+              "requiredScore": 495117,
+              "battleRequiredScore": 879019
+            },
+            {
+              "rank": "B",
+              "requiredScore": 1731771,
+              "battleRequiredScore": 3064079
+            },
+            {
+              "rank": "A",
+              "requiredScore": 4389644,
+              "battleRequiredScore": 8031441
+            },
+            {
+              "rank": "S",
+              "requiredScore": 6133727,
+              "battleRequiredScore": 11405008
+            },
+            {
+              "rank": "SS",
+              "requiredScore": 7577522,
+              "battleRequiredScore": 14303737
+            }
+          ]
+        },
+        {
+          "id": 100026,
+          "title": "Ave Mujica",
+          "scoreRanks": [
+            {
+              "rank": "D",
+              "requiredScore": 0,
+              "battleRequiredScore": 0
+            },
+            {
+              "rank": "C",
+              "requiredScore": 553488,
+              "battleRequiredScore": 863848
+            },
+            {
+              "rank": "B",
+              "requiredScore": 1919628,
+              "battleRequiredScore": 3208525
+            },
+            {
+              "rank": "A",
+              "requiredScore": 4468859,
+              "battleRequiredScore": 8108416
+            },
+            {
+              "rank": "S",
+              "requiredScore": 6270852,
+              "battleRequiredScore": 11897425
+            },
+            {
+              "rank": "SS",
+              "requiredScore": 7778519,
+              "battleRequiredScore": 14630714
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "latestJPObservation": {
+    "status": "query-failed",
+    "inputApiCandidateIndex": 2,
+    "errorType": "GameApiError",
+    "diagnosticCategories": [
+      "UNAVAILABLE"
+    ]
+  },
+  "failedScheduledRun": {
+    "runId": 36699637364,
+    "head": "b1176c9",
+    "failure": "chart Live/MusicScore/0109/0109_00 (MasterLiveMusicScore 10010900): no such asset",
+    "upstreamSelectorFix": "c5f39f85c6e54f1532b4b81837434ec2015f59dd"
+  },
+  "mainDryRun": {
+    "runId": 36817548100,
+    "head": "c5f39f85c6e54f1532b4b81837434ec2015f59dd",
+    "force": true,
+    "dryRun": true,
+    "statusAtCollection": "in-progress"
+  },
+  "interpretation": [
+    "The screenshot values 415687/1204973/3429867/4638937/5637904 match published TW music100021 solo and room fields.",
+    "The values 495117/1731771/4389644/6133727/7577522 match saved JP music100021 solo fields; saved JP room fields differ.",
+    "This cross-region comparison does not establish a same-region latest chart correction or a note-score formula change."
+  ]
+}
