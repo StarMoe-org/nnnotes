@@ -109,6 +109,12 @@ nothing being published, `plan` finds no `build.json` and every run builds.
 
 ## Gates
 
+The replay inventory also accepts `manifest.snapLabels` (`nnnotes.replay-labels/1`). Its SHA/size, region,
+master version and all 13 served-table hashes must match the checked music-data provenance. It is uploaded and
+read back as an independent payload before the replay manifest and data pointer. Older manifests without labels
+continue to work. Full decoded labels are in the resource tree, not the compact music-data file or CI reports;
+they contain no server configuration, credentials or score formula. See [replay metadata](../docs/replay.md).
+
 Every one must pass, else nothing is published. Warnings go to the job summary and `build.json` and do not stop it.
 
 | Gate | Checks |

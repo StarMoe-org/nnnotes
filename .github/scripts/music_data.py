@@ -79,6 +79,9 @@ APTITUDE_SLACK = 1e-6                               # relative: the aptitude's i
 DIFFICULTIES = ("easy", "normal", "hard", "expert")
 SONG_TABLES = ("MasterLiveMusic", "MasterLiveMusicScore", "MasterText", "MasterBand", "MasterCharacter", "MasterTag",
                "MasterLiveMusicCategory", "MasterSound", "MasterSoundCueSheet", "MasterLiveScoreRank")
+REPLAY_LABEL_TABLES = ("MasterSupportSkill", "MasterSupportSkillEffect", "MasterGekisouSupportSkill",
+                       "MasterGekisouSupportSkillEffect", "MasterText", "MasterSkillConditionSet", "MasterSkillCondition",
+                       "MasterSkillCumulativeCondition", "MasterSkillTarget", "MasterCharacter", "MasterMemberCard", "MasterSupportCard", "MasterBand")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 LISTED = 20                                         # failures and warnings listed per gate
@@ -360,12 +363,27 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
     if engine["model"]["commit"] != doc["provenance"]["deck"]["commit"]:
         raise ValueError("replay engine and music data name different model commits")
     paths = []
-    for entry in [manifest["deckData"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"]]:
+    entries = [manifest["deckData"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"]]
+    if "snapLabels" in manifest:
+        entries.append(manifest["snapLabels"])
+    for entry in entries:
         path = local(manifest_path.parent, entry["url"])
         data = path.read_bytes()
         if sha256(data) != entry["sha256"] or len(data) != entry["bytes"]:
             raise ValueError(f"replay artifact SHA/size mismatch: {entry['url']}")
         paths.append(path)
+    if "snapLabels" in manifest:
+        labels = json.loads(local(manifest_path.parent, manifest["snapLabels"]["url"]).read_bytes())
+        provenance = doc["provenance"]
+        if (manifest["snapLabels"].get("format") != "nnnotes.replay-labels/1"
+                or labels.get("format") != "nnnotes.replay-labels/1" or labels.get("region") != provenance["region"]
+                or labels.get("masterVersion") != provenance["master"]["version"]):
+            raise ValueError("replay labels differ from the music-data snapshot")
+        for name in REPLAY_LABEL_TABLES:
+            table = (labels.get("tables") or {}).get(name) or {}
+            if (not isinstance(table.get("rows"), list) or not SHA256.fullmatch(str(table.get("sha256")))
+                    or table["sha256"] != provenance["master"]["tables"].get(name, {}).get("sha256")):
+                raise ValueError(f"replay labels {name} differs from the master provenance")
     expected_ids = sorted(c["scoreId"] for s in doc["songs"] for c in s["charts"])
     if sorted(c["scoreId"] for c in manifest["charts"]) != expected_ids or pointer.get("charts") != len(expected_ids):
         raise ValueError("replay chart IDs/count differ from music data")
