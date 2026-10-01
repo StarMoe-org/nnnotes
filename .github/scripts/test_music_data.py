@@ -737,11 +737,37 @@ def test_publish_needs_passed_gates(tmp_path, monkeypatch):
     assert s3.store == {}
 
 
+def replay_path(out, doc, name):
+    return (out / doc["replay"]["manifestUrl"]).parent / name
+
+
+def replay_key(doc, name):
+    return "music-data/" + (Path(doc["replay"]["manifestUrl"]).parent / name).as_posix()
+
+
+def rewrite_replay_manifest(out, doc, manifest):
+    """The authentic producer puts every bundle under its manifest's decoded SHA."""
+    raw_manifest = json.dumps(manifest).encode()
+    previous = replay_path(out, doc, "manifest.json").parent
+    sha = music_data.sha256(raw_manifest)
+    current = out / "replay" / sha
+    if previous != current:
+        previous.rename(current)
+    (current / "manifest.json").write_bytes(raw_manifest)
+    doc["replay"].update(manifestUrl=f"replay/{sha}/manifest.json", sha256=sha)
+    raw = json.dumps(doc).encode()
+    (out / music_data.FILE).write_bytes(raw)
+    for file in ("check.json", "build.json"):
+        info = json.loads((out / file).read_bytes())
+        info.update(sha256=music_data.sha256(raw), bytes=len(raw))
+        (out / file).write_text(json.dumps(info))
+
+
 def replay_out(out):
     """Small ABI resources: exercise publication identity/order without game assets."""
     doc = json.loads((out / music_data.FILE).read_bytes())
     commit = doc["provenance"]["deck"]["commit"]
-    base = out / "replay"
+    base = out / "replay" / "staging"
     def resource(url, raw):
         path = base / url
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -758,14 +784,9 @@ def replay_out(out):
                                                   "js": js, "wasm": wasm, "build": built}}
     raw_manifest = json.dumps(manifest).encode()
     resource("manifest.json", raw_manifest)
-    doc["replay"] = {"format": manifest["format"], "manifestUrl": "replay/manifest.json",
+    doc["replay"] = {"format": manifest["format"], "manifestUrl": "replay/staging/manifest.json",
                      "sha256": music_data.sha256(raw_manifest), "charts": len(charts)}
-    raw = json.dumps(doc).encode()
-    (out / music_data.FILE).write_bytes(raw)
-    for file in ("check.json", "build.json"):
-        info = json.loads((out / file).read_bytes())
-        info["sha256"] = music_data.sha256(raw)
-        (out / file).write_text(json.dumps(info))
+    rewrite_replay_manifest(out, doc, manifest)
     return doc, manifest
 
 
@@ -781,7 +802,45 @@ def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatc
     assert keys[-3:] == [runtime[-1], "music-data/music-data.json", "music-data/build.json"]
     assert set(runtime[:-1]).issubset(keys[:-3])
     types = {k: mime for k, _, mime in s3.log}
-    assert types["music-data/replay/engine/ournotes_replay_bg.wasm"] == "application/wasm"
+    assert types[replay_key(doc, "engine/ournotes_replay_bg.wasm")] == "application/wasm"
+
+
+@pytest.mark.parametrize("manifest_url", ["replay/manifest.json", "replay/" + "f" * 64 + "/manifest.json"])
+def test_mutable_or_wrong_digest_runtime_pointer_is_rejected_before_any_upload(tmp_path, monkeypatch, manifest_url):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    doc, _ = replay_out(out)
+    doc["replay"]["manifestUrl"] = manifest_url
+    raw = json.dumps(doc).encode(); (out / music_data.FILE).write_bytes(raw)
+    for name in ("check.json", "build.json"):
+        report = json.loads((out / name).read_bytes()); report["sha256"] = music_data.sha256(raw)
+        (out / name).write_text(json.dumps(report))
+    with pytest.raises(SystemExit, match="immutable SHA directory"):
+        music_data.cmd_publish(str(out))
+    assert not s3.log
+
+
+def test_runtime_payload_cannot_escape_to_a_shared_mutable_key(tmp_path, monkeypatch):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    doc, manifest = replay_out(out)
+    # The declared bytes/hash are valid, but this key would be shared across bundles.
+    (out / "replay/shared.json").write_bytes(b"{}")
+    manifest["deckData"]["url"] = "../shared.json"
+    rewrite_replay_manifest(out, doc, manifest)
+    with pytest.raises(SystemExit, match="immutable bundle directory"):
+        music_data.cmd_publish(str(out))
+    assert not s3.log
+
+
+def test_both_shared_songs_publishers_hold_one_global_lock_then_prebuilt_holds_region_lock():
+    workflows = Path(__file__).resolve().parent.parent / "workflows"
+    prebuilt = (workflows / "music-data-prebuilt.yml").read_text()
+    page = (workflows / "songs-page.yml").read_text()
+    for workflow in (prebuilt, page):
+        assert "\nconcurrency:\n" in workflow
+        assert "\n  group: songs-page-publication\n  cancel-in-progress: false" in workflow
+    assert "\n    concurrency:\n      group: music-data-${{ inputs.region }}\n      cancel-in-progress: false" in prebuilt
 
 
 @pytest.mark.parametrize("defect", [None, "bytes", "region", "table_hash"])
@@ -799,18 +858,11 @@ def test_replay_labels_are_checked_and_uploaded_before_manifest(tmp_path, monkey
     elif defect == "table_hash":
         labels["tables"]["MasterText"]["sha256"] = "cd" * 32
     raw = json.dumps(labels).encode()
-    path = out / "replay" / "snap-labels.json"
+    path = replay_path(out, doc, "snap-labels.json")
     path.write_bytes(raw)
     manifest["snapLabels"] = {"format": labels["format"], "url": "snap-labels.json", "sha256": music_data.sha256(raw), "bytes": len(raw)}
-    raw = json.dumps(manifest).encode()
-    (out / "replay" / "manifest.json").write_bytes(raw)
-    doc["replay"]["sha256"] = music_data.sha256(raw)
-    raw = json.dumps(doc).encode()
-    (out / music_data.FILE).write_bytes(raw)
-    for name in ("check.json", "build.json"):
-        report = json.loads((out / name).read_bytes())
-        report["sha256"] = music_data.sha256(raw)
-        (out / name).write_text(json.dumps(report))
+    rewrite_replay_manifest(out, doc, manifest)
+    path = replay_path(out, doc, "snap-labels.json")
     if defect == "bytes":
         path.write_bytes(b"tampered labels")
     if defect:
@@ -820,7 +872,7 @@ def test_replay_labels_are_checked_and_uploaded_before_manifest(tmp_path, monkey
     else:
         music_data.cmd_publish(str(out))
         keys = [key for key, _, _ in s3.log]
-        assert keys.index("music-data/replay/snap-labels.json") < keys.index("music-data/replay/manifest.json")
+        assert keys.index(replay_key(doc, "snap-labels.json")) < keys.index(replay_key(doc, "manifest.json"))
 
 
 @pytest.mark.parametrize("changed", ["bytes", "model", "escape", "absolute", "ids", "abi", "dirty"])
@@ -829,47 +881,41 @@ def test_replay_identity_failure_prevents_any_upload(tmp_path, monkeypatch, chan
     out, _ = published_out(tmp_path, monkeypatch, s3)
     doc, manifest = replay_out(out)
     if changed == "bytes":
-        (out / "replay/deck-data.json").write_bytes(b"tampered")
+        replay_path(out, doc, "deck-data.json").write_bytes(b"tampered")
     else:
         if changed == "model":
             manifest["engine"]["model"]["commit"] = "other"
         elif changed == "escape":
             manifest["deckData"]["url"] = "../../escaped.json"
         elif changed == "absolute":
-            manifest["deckData"]["url"] = str((out / "replay/deck-data.json").resolve())
+            manifest["deckData"]["url"] = str(replay_path(out, doc, "deck-data.json").resolve())
         elif changed == "ids":
             manifest["charts"][0]["scoreId"] = -1
         elif changed == "abi":
             manifest["engine"]["requestFormat"] = "other"
         elif changed == "dirty":
-            built = out / "replay/engine/build.json"
+            built = replay_path(out, doc, "engine/build.json")
             data = json.loads(built.read_bytes())
             data["workingTreeDirty"] = True
             raw = json.dumps(data).encode()
             built.write_bytes(raw)
             manifest["engine"]["build"].update(sha256=music_data.sha256(raw), bytes=len(raw))
-        raw = json.dumps(manifest).encode()
-        (out / "replay/manifest.json").write_bytes(raw)
-        doc["replay"]["sha256"] = music_data.sha256(raw)
-        raw_doc = json.dumps(doc).encode()
-        (out / music_data.FILE).write_bytes(raw_doc)
-        report = json.loads((out / "check.json").read_bytes())
-        report["sha256"] = music_data.sha256(raw_doc)
-        (out / "check.json").write_text(json.dumps(report))
+        rewrite_replay_manifest(out, doc, manifest)
     with pytest.raises(SystemExit, match="replay resources changed after gates"):
         music_data.cmd_publish(str(out))
     assert not s3.store
 
 
 def test_replay_read_back_failure_stops_before_runtime_pointer(tmp_path, monkeypatch):
-    s3 = FakeS3(corrupt="music-data/replay/engine/ournotes_replay_bg.wasm")
+    s3 = FakeS3()
     out, _ = published_out(tmp_path, monkeypatch, s3)
-    replay_out(out)
+    doc, _ = replay_out(out)
+    s3.corrupt = replay_key(doc, "engine/ournotes_replay_bg.wasm")
     monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
     monkeypatch.setattr(music_data.http_compression, "get_object", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
     with pytest.raises(SystemExit, match="does not serve what was uploaded"):
         music_data.cmd_publish(str(out))
-    assert "music-data/replay/manifest.json" not in s3.store
+    assert replay_key(doc, "manifest.json") not in s3.store
     assert "music-data/music-data.json" not in s3.store
     assert "music-data/build.json" not in s3.store
 
@@ -884,7 +930,7 @@ def test_parallel_payload_readbacks_finish_before_any_pointer(tmp_path, monkeypa
     payloads = {archive, *(p.relative_to(out).as_posix() for p in paths[:-1])}
     pointers = [paths[-1].relative_to(out).as_posix(), music_data.FILE, music_data.MARKER]
     if corrupt:
-        key = archive if corrupt == "archive" else "replay/engine/ournotes_replay_bg.wasm"
+        key = archive if corrupt == "archive" else replay_key(doc, "engine/ournotes_replay_bg.wasm").removeprefix("music-data/")
         s3.corrupt = "music-data/" + key
         monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
         monkeypatch.setattr(music_data.http_compression, "get_object", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))

@@ -376,12 +376,15 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
     if not pointer:
         return []
     root = out.resolve()
+    if (not SHA256.fullmatch(str(pointer.get("sha256")))
+            or pointer.get("manifestUrl") != f"replay/{pointer['sha256']}/manifest.json"):
+        raise ValueError("replay manifest must use its immutable SHA directory")
     def local(base: Path, url: str) -> Path:
         if not isinstance(url, str) or not url or any(c in url for c in (":", "\\", "?", "#")) or Path(url).is_absolute():
             raise ValueError("replay artifact URL must be a relative file path")
         path = (base / url).resolve()
-        if not path.is_relative_to(root):
-            raise ValueError("replay artifact URL must stay within the output directory")
+        if not path.is_relative_to(root) or not path.is_relative_to(base.resolve()):
+            raise ValueError("replay artifact URL must stay within its immutable bundle directory")
         return path
     manifest_path = local(root, pointer["manifestUrl"])
     raw = manifest_path.read_bytes()

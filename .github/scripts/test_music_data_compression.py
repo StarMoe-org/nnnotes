@@ -2,6 +2,9 @@
 import gzip
 import io
 import json
+from pathlib import Path
+from pathlib import PurePosixPath
+import sys
 
 import pytest
 
@@ -9,7 +12,8 @@ import http_compression as transport
 import music_data as md
 import music_data_reencode as reencode
 import story_site
-from test_music_data import FakeS3, FakeBucket, published_out, replay_out
+import songs_page_data
+from test_music_data import FakeS3, FakeBucket, published_out, replay_out, replay_path, replay_key, rewrite_replay_manifest
 
 
 def test_json_transport_keeps_the_manifest_hash_and_has_deterministic_stored_identity(tmp_path):
@@ -79,6 +83,85 @@ def test_python_public_reads_decode_real_content_encoding(monkeypatch):
     assert story_site.get("https://example.test/data.json") == raw
 
 
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_ui_reader_checks_decoded_gzip_identity(monkeypatch, tmp_path, corrupt):
+    raw = b'{"source":"current"}'
+    class Response:
+        headers = {"Content-Encoding": "gzip"}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, size): return gzip.compress(raw)
+    def urlopen(request, **kwargs):
+        assert request.headers["Accept-encoding"] == "gzip"
+        return Response()
+    monkeypatch.setattr(songs_page_data.urllib.request, "urlopen", urlopen)
+    expected = "a" * 64 if corrupt else md.sha256(raw)
+    if corrupt:
+        with pytest.raises(ValueError, match="SHA/size mismatch"):
+            songs_page_data.fetch(PurePosixPath("data.json"), expected, tmp_path / "data.json", len(raw))
+    else:
+        assert songs_page_data.fetch(PurePosixPath("data.json"), expected, tmp_path / "data.json", len(raw)) == raw
+
+
+@pytest.mark.parametrize("defect", [None, "marker-race", "missing-gate", "labels"])
+def test_ui_reader_freezes_new_snapshot_from_marker_archive_and_rejects_changed_identities(tmp_path, monkeypatch, defect):
+    model = "a" * 40
+    source = {"masterVersion": "new-86-song-master"}
+    tables = {name: {"sha256": "b" * 64} for name in md.REPLAY_LABEL_TABLES}
+    provenance = {"region": "tw", "master": {"version": source["masterVersion"], "tables": tables}, "deck": {"commit": model}}
+    blobs = {}
+    def resource(name, raw):
+        blobs[name] = raw
+        return {"url": name, "sha256": md.sha256(raw), "bytes": len(raw)}
+    js = resource("engine/replay.js", b"export default ()=>{}"); wasm = resource("engine/replay.wasm", b"wasm")
+    engine_build = resource("engine/build.json", json.dumps({"commit": model, "workingTreeDirty": False,
+        "jsSha256": js["sha256"], "wasmSha256": wasm["sha256"]}).encode())
+    deck = resource("deck-data.json", json.dumps({"provenance": provenance}).encode())
+    labels = {"format": "nnnotes.replay-labels/1", "region": "tw", "masterVersion": source["masterVersion"],
+        "tables": {name: {**table, "rows": []} for name, table in tables.items()}}
+    if defect == "labels": labels["masterVersion"] = "old"
+    label_entry = resource("snap-labels.json", json.dumps(labels).encode())
+    chart = {"scoreId": 10000200, **resource("charts/10000200.json", b"{}")}
+    manifest = {"format": "nnnotes.replay-manifest/1", "charts": [chart], "deckData": deck, "snapLabels": label_entry,
+        "engine": {"model": {"commit": model}, "requestFormat": "ournotes.replay/1", "js": js, "wasm": wasm, "build": engine_build}}
+    manifest_raw = json.dumps(manifest).encode(); manifest_sha = md.sha256(manifest_raw)
+    runtime = f"replay/{manifest_sha}/"
+    blobs = {runtime + key: value for key, value in blobs.items()}
+    blobs[runtime + "manifest.json"] = manifest_raw
+    doc = {"provenance": provenance, "songs": [{}] * 86,
+        "replay": {"sha256": manifest_sha, "manifestUrl": runtime + "manifest.json"}}
+    main_raw = json.dumps(doc).encode(); main_sha = md.sha256(main_raw)
+    archive = f"archive/{source['masterVersion']}/{main_sha}.json"; blobs[archive] = main_raw
+    marker = {"format": md.BUILD_FORMAT, "file": md.FILE, "archive": archive, "sha256": main_sha, "bytes": len(main_raw),
+        "inputs": {"deckCommit": model}, "sourceSnapshot": source,
+        "gates": {name: {"passed": True} for name in {name for name, _ in md.GATES} | {"replay"}}}
+    if defect == "missing-gate": marker["gates"].pop("replay")
+    blobs[md.MARKER] = json.dumps(marker).encode(); requested = []
+    class Response:
+        headers = {"Content-Encoding": "gzip"}
+        def __init__(self, body): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, size): return gzip.compress(self.body)
+    def urlopen(request, **kwargs):
+        key = request.full_url.removeprefix(songs_page_data.BASE); requested.append(key)
+        if defect == "marker-race" and key == md.MARKER and requested.count(key) > 1: return Response(b'{}')
+        return Response(blobs[key])
+    monkeypatch.setattr(songs_page_data.urllib.request, "urlopen", urlopen)
+    out = tmp_path / "ui"
+    monkeypatch.setattr(sys, "argv", ["songs_page_data", "--player-ref", "c" * 40, "--out", str(out)])
+    if defect:
+        with pytest.raises(ValueError): songs_page_data.main()
+        assert not (out / "page-pin/prebuilt.json").exists()
+    else:
+        songs_page_data.main()
+        report = json.loads((out / "data-check.json").read_bytes())
+        assert report["mainSha256"] == main_sha and report["manifestSha256"] == manifest_sha
+        assert (out / "data/music-data.json").read_bytes() == main_raw
+        assert md.FILE not in requested and archive in requested and requested.count(md.MARKER) == 2
+        assert report["sourceSnapshot"] == source
+
+
 def fixture(tmp_path, monkeypatch):
     s3 = FakeS3(); out, _ = published_out(tmp_path, monkeypatch, s3)
     doc, manifest = replay_out(out)
@@ -88,10 +171,9 @@ def fixture(tmp_path, monkeypatch):
         labels["tables"][name] = {"sha256": "ab" * 32, "rows": []}
         doc["provenance"]["master"]["tables"][name] = {"sha256": "ab" * 32}
     label_raw = json.dumps(labels).encode()
-    (out / "replay/snap-labels.json").write_bytes(label_raw)
+    replay_path(out, doc, "snap-labels.json").write_bytes(label_raw)
     manifest["snapLabels"] = {"format": labels["format"], "url": "snap-labels.json", "sha256": md.sha256(label_raw), "bytes": len(label_raw)}
-    manifest_raw = json.dumps(manifest).encode(); (out / "replay/manifest.json").write_bytes(manifest_raw)
-    doc["replay"]["sha256"] = md.sha256(manifest_raw)
+    rewrite_replay_manifest(out, doc, manifest)
     raw = json.dumps(doc).encode(); (out / md.FILE).write_bytes(raw)
     marker = json.loads((out / md.MARKER).read_bytes())
     marker.update(format=md.BUILD_FORMAT, file=md.FILE, sha256=md.sha256(raw), bytes=len(raw),
@@ -115,7 +197,7 @@ def test_reencoding_changes_all_json_transport_and_preserves_wasm_js_and_every_d
     s3, _ = fixture(tmp_path, monkeypatch); before = dict(s3.store)
     report = reencode.reencode(tmp_path / "encoding")
     assert report["encodedBytes"] < report["decodedBytes"]
-    assert {"replay/snap-labels.json", "replay/deck-data.json", "replay/manifest.json", "music-data.json", "build.json"} <= {item["key"] for item in report["objects"]}
+    assert {"snap-labels.json", "deck-data.json", "manifest.json", "music-data.json", "build.json"} <= {Path(item["key"]).name for item in report["objects"]}
     for full, raw in before.items():
         if full.endswith(".json"):
             assert s3.headers[full]["ContentEncoding"] == "gzip"
@@ -127,7 +209,8 @@ def test_reencoding_changes_all_json_transport_and_preserves_wasm_js_and_every_d
 @pytest.mark.parametrize("change", ["payload", "marker", "source", "labels"])
 def test_reencoding_rejects_stale_source_changed_marker_or_broken_payload_before_writing(tmp_path, monkeypatch, change):
     s3, _ = fixture(tmp_path, monkeypatch)
-    if change == "payload": s3.store["music-data/replay/deck-data.json"] = b"broken"
+    doc = json.loads(md.published(md.FILE))
+    if change == "payload": s3.store[replay_key(doc, "deck-data.json")] = b"broken"
     if change == "marker":
         original = md.published; count = 0
         def published(key):
@@ -138,7 +221,7 @@ def test_reencoding_rejects_stale_source_changed_marker_or_broken_payload_before
             return original(key)
         monkeypatch.setattr(md, "published", published)
     if change == "source": monkeypatch.setattr(md, "require_current_source", lambda marker: md.fail("source snapshot changed"))
-    if change == "labels": s3.store.pop("music-data/replay/snap-labels.json")
+    if change == "labels": s3.store.pop(replay_key(doc, "snap-labels.json"))
     with pytest.raises((ValueError, SystemExit)):
         reencode.reencode(tmp_path / "encoding")
     assert s3.log == []

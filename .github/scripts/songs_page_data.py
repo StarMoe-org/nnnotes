@@ -7,10 +7,10 @@ import re
 import urllib.request
 from pathlib import Path, PurePosixPath
 
+from http_compression import decode_content
+from music_data import GATES, REPLAY_LABEL_TABLES
+
 BASE = "https://storage.bdon.moe/moenotes/music-data/"
-MAIN_SHA = "983896151d3ed69d9dfe26044225907e33be037e4b74589e110ded64780f8738"
-MANIFEST_SHA = "8941cc7b2e146b3376dcbeefe9efab4a10b09845b9e0dad1ab76d1ee2b990dea"
-MODEL = "dbd9cf01a4854808dceb6aedcd4041af372faeee"
 
 
 def relative(value):
@@ -23,10 +23,13 @@ def relative(value):
 
 
 def fetch(path, expected, destination, expected_bytes=None):
-    request = urllib.request.Request(BASE + path.as_posix(), headers={"Cache-Control": "no-cache"})
+    request = urllib.request.Request(BASE + path.as_posix(), headers={"Cache-Control": "no-cache", "Accept-Encoding": "gzip"})
     with urllib.request.urlopen(request, timeout=120) as response:
-        raw = response.read(64 * 1024 * 1024 + 1)
-    if len(raw) > 64 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != expected:
+        encoded = response.read(64 * 1024 * 1024 + 1)
+        if len(encoded) > 64 * 1024 * 1024:
+            raise ValueError(f"published encoded resource exceeds size limit: {path}")
+        raw = decode_content(encoded, response.headers.get("Content-Encoding"))
+    if len(raw) > 64 * 1024 * 1024 or (expected is not None and hashlib.sha256(raw).hexdigest() != expected):
         raise ValueError(f"published resource SHA/size mismatch: {path}")
     if expected_bytes is not None and len(raw) != expected_bytes:
         raise ValueError(f"published resource byte count mismatch: {path}")
@@ -48,15 +51,32 @@ def main():
     if args.out.exists():
         parser.error("output must be a fresh directory")
     out = args.out / "data"
-    raw = fetch(PurePosixPath("music-data.json"), MAIN_SHA, out / "music-data.json")
+    marker_raw = fetch(PurePosixPath("build.json"), None, out / "build.json")
+    marker = json.loads(marker_raw)
+    if (marker.get("format") != "moenotes.music-data-build/1" or marker.get("file") != "music-data.json"
+            or not re.fullmatch(r"[0-9a-f]{64}", str(marker.get("sha256")))
+            or type(marker.get("bytes")) is not int or marker["bytes"] <= 0
+            or any((marker.get("gates", {}).get(name) or {}).get("passed") is not True
+                   for name in {name for name, _ in GATES} | {"replay"})):
+        raise ValueError("published build marker lacks verified source identity and gates")
+    main_sha = marker["sha256"]
+    archive_path = relative(marker["archive"])
+    if archive_path.parts[0] != "archive" or archive_path.name != main_sha + ".json":
+        raise ValueError("published build archive is not content-addressed")
+    raw = fetch(archive_path, main_sha, out / "music-data.json", marker["bytes"])
     doc = json.loads(raw)
     pointer = doc["replay"]
-    if pointer["sha256"] != MANIFEST_SHA:
-        raise ValueError("published main names a different replay manifest")
+    model = marker["inputs"]["deckCommit"]
+    if (not re.fullmatch(r"[0-9a-f]{40}", str(model)) or doc["provenance"]["deck"]["commit"] != model
+            or doc["provenance"]["master"]["version"] != marker["sourceSnapshot"]["masterVersion"]):
+        raise ValueError("published main and build source/model identities differ")
+    manifest_sha = pointer["sha256"]
     manifest_path = relative(pointer["manifestUrl"])
-    manifest = json.loads(fetch(manifest_path, MANIFEST_SHA, out / str(manifest_path)))
+    if str(manifest_path) != f"replay/{manifest_sha}/manifest.json":
+        raise ValueError("published replay manifest is not content-addressed")
+    manifest = json.loads(fetch(manifest_path, manifest_sha, out / str(manifest_path)))
     if (manifest["format"] != "nnnotes.replay-manifest/1" or
-            manifest["engine"]["model"]["commit"] != MODEL or
+            manifest["engine"]["model"]["commit"] != model or
             manifest["engine"]["requestFormat"] != "ournotes.replay/1"):
         raise ValueError("published engine identity/ABI differs from the frozen model")
     chart = [c for c in manifest["charts"] if c["scoreId"] == 10000200]
@@ -64,19 +84,35 @@ def main():
         raise ValueError("published manifest lacks the reviewed chart 10000200")
     resources = [manifest["deckData"], manifest["engine"]["js"], manifest["engine"]["wasm"],
                  manifest["engine"]["build"], chart[0]]
+    if "snapLabels" not in manifest:
+        raise ValueError("published snapshot lacks the same-source Snap labels")
+    resources.append(manifest["snapLabels"])
     for entry in resources:
         path = manifest_path.parent / relative(entry["url"])
         fetch(path, entry["sha256"], out / str(path), entry["bytes"])
+    deck = json.loads((out / str(manifest_path.parent / relative(manifest["deckData"]["url"]))).read_bytes())
+    labels = json.loads((out / str(manifest_path.parent / relative(manifest["snapLabels"]["url"]))).read_bytes())
+    p = doc["provenance"]
+    if (deck["provenance"]["region"] != p["region"] or deck["provenance"]["master"]["version"] != p["master"]["version"]
+            or deck["provenance"]["deck"]["commit"] != model or labels.get("format") != "nnnotes.replay-labels/1"
+            or labels.get("region") != p["region"] or labels.get("masterVersion") != p["master"]["version"]
+            or any((labels.get("tables", {}).get(name) or {}).get("sha256") != p["master"]["tables"][name]["sha256"]
+                   or not isinstance((labels.get("tables", {}).get(name) or {}).get("rows"), list)
+                   for name in REPLAY_LABEL_TABLES)):
+        raise ValueError("published deck/labels differ from the frozen source")
     engine_build = json.loads((out / str(manifest_path.parent / relative(manifest["engine"]["build"]["url"]))).read_bytes())
-    if (engine_build["commit"] != MODEL or engine_build.get("workingTreeDirty") is True or
+    if (engine_build["commit"] != model or engine_build.get("workingTreeDirty") is True or
             engine_build["jsSha256"] != manifest["engine"]["js"]["sha256"] or
             engine_build["wasmSha256"] != manifest["engine"]["wasm"]["sha256"]):
         raise ValueError("published engine build metadata is inconsistent")
+    marker_sha = hashlib.sha256(marker_raw).hexdigest()
+    fetch(PurePosixPath("build.json"), marker_sha, args.out / "marker-after.json", len(marker_raw))
     pin = args.out / "page-pin"
     pin.mkdir()
     (pin / "prebuilt.json").write_text(json.dumps({"player": {"commit": args.player_ref}}) + "\n")
-    report = {"mainSha256": MAIN_SHA, "manifestSha256": MANIFEST_SHA, "modelCommit": MODEL,
-              "playerCommit": args.player_ref, "downloadedResources": 7,
+    report = {"mainSha256": main_sha, "manifestSha256": manifest_sha, "modelCommit": model,
+              "buildMarkerSha256": marker_sha, "sourceSnapshot": marker["sourceSnapshot"],
+              "playerCommit": args.player_ref, "downloadedResources": 3 + len(resources),
               "scope": "UI-only immutable consumer inputs; no data build or data upload"}
     (args.out / "data-check.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report))

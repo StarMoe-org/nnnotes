@@ -479,7 +479,9 @@ def cmd_publish(site_dir: str, dry_run: bool = False) -> None:
     if not bucket.writable and not dry_run:
         sys.exit("story_site: publish needs STORY_S3_ACCESS_KEY and STORY_S3_SECRET_KEY")
     before = json.loads(fetched_file(site).read_text(encoding="utf-8"))
-    local = sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.is_file())
+    # The dedicated songs publishers own this shared page and its pinned consumer closure.
+    local = sorted(p.relative_to(site).as_posix() for p in site.rglob("*")
+                   if p.is_file() and not p.relative_to(site).as_posix().startswith("songs/"))
     assets = [k for k in local if k.startswith(ASSETS)]
     with ThreadPoolExecutor(max_workers=16) as executor:
         have = dict(zip(assets, executor.map(bucket.object_size, assets)))
