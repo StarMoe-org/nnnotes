@@ -330,6 +330,9 @@ def cmd_build(out: str) -> None:
     if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine")):
         fail("the installed nnnotes lacks decoded-master/replay export (sync the fork with upstream)")
     engine = build_replay_engine(o)
+    if env("MASTERDATA_REGION") == "jp":
+        import jp_vpngate
+        jp_vpngate.start()
     cmd = nnnotes + ["music-data", "--decoded-master", "--jackets", str(o / "jackets"),
                     "--replay-dir", str(o / "replay"), "--replay-engine", str(engine), "-o", str(o / FILE)]
     print("+ " + " ".join(cmd[1:]), flush=True)

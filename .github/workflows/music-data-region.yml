@@ -146,7 +146,9 @@ jobs:
           NNNOTES_PATHS_CACHE: ${{ env.WORK }}/cache
           NNNOTES_PATHS_MASTER: ${{ env.WORK }}/master
           NNNOTES_PATHS_APK: ${{ env.WORK }}/apk/base.apk
-        run: python .github/scripts/music_data.py build "$WORK/out"
+        run: |
+          if [ "${{ inputs.region }}" = "jp" ]; then python .github/scripts/jp_vpngate.py start; fi
+          python .github/scripts/music_data.py build "$WORK/out"
 
       - name: Gates
         id: gates

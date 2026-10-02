@@ -49,7 +49,7 @@ def profile(row, targets):
         raise ValueError("relay has no supported protocol")
     settings = ["client", "dev tun", "proto " + ("tcp-client" if proto[1] == "tcp" else proto[1]),
                 f"remote {row['IP']} {remote[0][1]}", "nobind", "persist-key", "persist-tun", "route-nopull",
-                "script-security 1", "connect-retry-max 1", "connect-timeout 15", "verb 3"]
+                "script-security 1", "connect-timeout 15", "ping 5", "ping-restart 30", "verb 3"]
     for directive, allowed, default in [
         ("cipher", {"AES-128-CBC", "AES-256-CBC", "AES-128-GCM", "AES-256-GCM"}, "AES-128-CBC"),
         ("auth", {"SHA1", "SHA256", "SHA384", "SHA512"}, "SHA1"),
