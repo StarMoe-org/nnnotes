@@ -37,6 +37,7 @@ class PublicationTests(unittest.TestCase):
         self.objects, self.puts = {}, []
         self.bad_dependency = False
         self.gateway_cache_mode = False
+        self.reordered_cache_mode = False
 
     def object_for(self, item):
         headers = {"Content-Type": item["contentType"], "Cache-Control": publisher.CACHE,
@@ -54,6 +55,8 @@ class PublicationTests(unittest.TestCase):
         body, headers = self.objects[relative]
         if self.gateway_cache_mode:
             headers = {**headers, "Cache-Control": "max-age=0"}
+        if self.reordered_cache_mode:
+            headers = {**headers, "Cache-Control": "public, immutable, max-age=31536000"}
         return Response(body, headers)
 
     def put_object(self, **options):
@@ -127,6 +130,13 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(report["cacheControlObserved"], ["max-age=0"])
         self.assertTrue(all(i["cacheControlObserved"] == "max-age=0" and not i["cachePolicyHonored"]
                             for i in report["objects"]))
+
+    def test_immutable_cache_directive_order_is_semantically_equivalent(self):
+        self.reordered_cache_mode = True
+        self.run_publication()
+        report = json.loads((self.args.report_dir / "public-verification.json").read_text())
+        self.assertTrue(report["cachePolicyHonored"])
+        self.assertEqual(report["cacheControlObserved"], ["public, immutable, max-age=31536000"])
 
 
 if __name__ == "__main__":

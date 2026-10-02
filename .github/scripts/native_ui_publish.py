@@ -39,6 +39,14 @@ def require(condition, reason):
         raise ValueError(reason)
 
 
+def immutable_cache_honored(value):
+    if not isinstance(value, str):
+        return False
+    # Cache-Control directive ordering is not semantically significant.
+    directives = [part.strip().lower() for part in value.split(",")]
+    return len(directives) == 3 and set(directives) == {"public", "immutable", "max-age=31536000"}
+
+
 def contained(root, name):
     require(isinstance(name, str) and "\\" not in name and ":" not in name
             and not name.startswith("/") and all(p not in ("", ".", "..") for p in name.split("/")),
@@ -182,14 +190,15 @@ def public_read(item, inventory, allow_missing=False):
             require(headers.get("Content-Type", "").split(";", 1)[0] == item["contentType"],
                     f"public MIME differs: {item['path']}")
             observed_cache = headers.get("Cache-Control")
-            require(observed_cache in (CACHE, "max-age=0"), f"unexpected public cache: {item['path']}")
+            honored_cache = immutable_cache_honored(observed_cache)
+            require(honored_cache or observed_cache == "max-age=0", f"unexpected public cache: {item['path']}")
             require(headers.get("Access-Control-Allow-Origin") in ("*", ORIGIN), f"public CORS missing: {item['path']}")
             for name, field in METADATA.items():
                 require(headers.get("x-amz-meta-" + name) == str(item[field]),
                         f"public identity metadata differs: {item['path']}")
             return {**item, "httpStatus": 200, "corsAllowOrigin": headers.get("Access-Control-Allow-Origin"),
                     "cacheControlRequested": CACHE, "cacheControlObserved": observed_cache,
-                    "cachePolicyHonored": observed_cache == CACHE, "verified": True}
+                    "cachePolicyHonored": honored_cache, "verified": True}
         except urllib.error.HTTPError as error:
             if error.code == 404 and allow_missing:
                 return None
