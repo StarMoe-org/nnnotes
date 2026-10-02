@@ -4,6 +4,7 @@ import base64
 import csv
 import io
 import ipaddress
+import os
 from pathlib import Path
 import re
 import socket
@@ -14,7 +15,8 @@ import time
 import story_site
 
 LIST_URL = "https://www.vpngate.net/api/iphone/"
-LIMIT = 6
+LIMIT = 12
+WATCH_INTERVAL = 20
 
 
 def relays(text):
@@ -87,7 +89,7 @@ def read_control_file(path):
                               text=True, timeout=10).stdout
 
 
-def stop():
+def stop_openvpn():
     pidfile = work_dir() / "openvpn.pid"
     if pidfile.exists():
         pid = read_control_file(pidfile).strip()
@@ -96,6 +98,18 @@ def stop():
                            stderr=subprocess.DEVNULL)
             time.sleep(1)
         pidfile.unlink(missing_ok=True)
+
+
+def stop():
+    watch_pidfile = work_dir() / "watch.pid"
+    if watch_pidfile.exists():
+        pid = read_control_file(watch_pidfile).strip()
+        if pid.isdecimal() and int(pid) > 1:
+            subprocess.run(["sudo", "kill", "--", pid], check=False, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            time.sleep(1)
+        watch_pidfile.unlink(missing_ok=True)
+    stop_openvpn()
 
 
 def probe():
@@ -128,7 +142,7 @@ def start():
     directory.mkdir(parents=True, exist_ok=True)
     log, pidfile = directory / "openvpn.log", directory / "openvpn.pid"
     for row in candidates:
-        stop()
+        stop_openvpn()
         log.unlink(missing_ok=True)
         try:
             contents = profile(row, targets)
@@ -157,13 +171,35 @@ def start():
             time.sleep(0.5)
         print("Relay did not provide JP Version access; trying the next one", flush=True)
         print("\n".join(read_control_file(log).splitlines()[-8:]), flush=True)
-    stop()
+    stop_openvpn()
     sys.exit("jp_vpngate: no relay passed the JP Version check")
+
+
+def watch():
+    directory = work_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    watch_pidfile = directory / "watch.pid"
+    watch_pidfile.write_text(str(os.getpid()))
+    try:
+        while True:
+            try:
+                start()
+            except SystemExit as error:
+                print(f"jp_vpngate: watchdog retry: {error}", flush=True)
+                stop_openvpn()
+            time.sleep(WATCH_INTERVAL)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_openvpn()
+        watch_pidfile.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["start"]:
         start()
+    elif sys.argv[1:] == ["watch"]:
+        watch()
     elif sys.argv[1:] == ["stop"]:
         stop()
     else:

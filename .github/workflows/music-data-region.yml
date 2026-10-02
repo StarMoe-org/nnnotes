@@ -93,7 +93,13 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq openvpn > /dev/null
           uv pip install --system --only-binary=:all: UnityPy numpy grpcio pycryptodome brotli
-          python .github/scripts/jp_vpngate.py start
+          python .github/scripts/jp_vpngate.py watch > "$RUNNER_TEMP/jp-vpngate-watch.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/jp-vpngate-watch-shell.pid"
+          for i in $(seq 1 60); do
+            if python .github/scripts/story_site.py jp-check; then break; fi
+            sleep 2
+          done
+          python .github/scripts/story_site.py jp-check
       - name: JP CDN authentication preflight
         if: inputs.region == 'jp'
         env:
@@ -147,7 +153,7 @@ jobs:
           NNNOTES_PATHS_MASTER: ${{ env.WORK }}/master
           NNNOTES_PATHS_APK: ${{ env.WORK }}/apk/base.apk
         run: |
-          if [ "${{ inputs.region }}" = "jp" ]; then python .github/scripts/jp_vpngate.py start; fi
+          if [ "${{ inputs.region }}" = "jp" ]; then python .github/scripts/story_site.py jp-check; fi
           python .github/scripts/music_data.py build "$WORK/out"
 
       - name: Gates

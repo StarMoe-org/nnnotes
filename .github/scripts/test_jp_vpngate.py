@@ -109,3 +109,7 @@ def test_root_owned_openvpn_files_can_be_read(monkeypatch, tmp_path):
 
     monkeypatch.setattr(jp_vpngate.subprocess, "run", run)
     assert jp_vpngate.read_control_file(path) == "Initialization Sequence Completed\n"
+
+
+def test_watch_interval_is_shorter_than_the_workflow_gap():
+    assert jp_vpngate.WATCH_INTERVAL <= 30
