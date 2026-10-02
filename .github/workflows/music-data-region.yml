@@ -36,6 +36,7 @@ env:
   PLAYFETCH_VERSION: ${{ vars.PLAYFETCH_VERSION || 'v0.92' }}
   APK_PACKAGE: ${{ inputs.region == 'jp' && 'com.bushiroad.sirius' || vars.STORY_APK_PACKAGE || 'com.bilibili.sirius' }}
   PYTHON_VERSION: "3.13"
+  PYTHONPATH: src
   WORK: ${{ github.workspace }}/music-data-work
   # Bundle keys come from secrets; catalog versions and CDN roots come from the saved master snapshot.
   NNNOTES_CATALOG_REGION: ${{ inputs.region == 'jp' && 'jp' || 'tw' }}
@@ -85,13 +86,19 @@ jobs:
         env:
           PLAYFETCH_CREDENTIALS_JSON: ${{ secrets.PLAYFETCH_CREDENTIALS }}
         run: .github/scripts/apk.sh "$WORK/apk"
-      - name: JP CDN authentication preflight
+      - name: JP API network access
         if: inputs.region == 'jp'
         env:
           NNNOTES_PATHS_APK: ${{ env.WORK }}/apk/base.apk
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq openvpn > /dev/null
           uv pip install --system --only-binary=:all: UnityPy numpy grpcio pycryptodome brotli
-          PYTHONPATH=src python .github/scripts/music_data.py jp-check
+          python .github/scripts/jp_vpngate.py start
+      - name: JP CDN authentication preflight
+        if: inputs.region == 'jp'
+        env:
+          NNNOTES_PATHS_APK: ${{ env.WORK }}/apk/base.apk
+        run: python .github/scripts/music_data.py jp-check
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -124,7 +131,7 @@ jobs:
       - name: Gate self-test
         env:
           MUSIC_DATA_PAGE: ${{ env.WORK }}/page/examples/songs
-        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py .github/scripts/test_music_data_compression.py
+        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py .github/scripts/test_music_data_compression.py .github/scripts/test_jp_vpngate.py
 
       - name: Master data
         run: python .github/scripts/music_data.py master "$WORK/master"
@@ -178,3 +185,7 @@ jobs:
             ${{ env.WORK }}/out/jackets
             ${{ env.WORK }}/out/check.json
             ${{ env.WORK }}/out/build.json
+
+      - name: Disconnect JP VPN
+        if: always() && inputs.region == 'jp'
+        run: python .github/scripts/jp_vpngate.py stop

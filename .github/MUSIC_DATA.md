@@ -40,8 +40,8 @@ encoding header. JavaScript, WASM and images retain their original bytes and tra
 automatically; Python consumers explicitly decode `Content-Encoding` before checking the manifest's SHA.
 
 A run never deletes anything from the bucket. Its helper steps are `.github/scripts/music_data.py` (with the bucket,
-HTTP and master data helpers of `story_site.py`), `music_data_smoke.mjs`, `songs_page.sh` and `apk.sh`; the gate
-self-tests are `test_music_data.py`, `test_jp_workflow.py` and `test_music_data_refresh.py`.
+HTTP and master data helpers of `story_site.py`), `jp_vpngate.py`, `music_data_smoke.mjs`, `songs_page.sh` and `apk.sh`; the gate
+self-tests are `test_music_data.py`, `test_jp_workflow.py`, `test_music_data_refresh.py`, `test_music_data_compression.py` and `test_jp_vpngate.py`.
 The Cloudflare Pages preview of the page is not part of the workflow.
 
 ## Refresh evidence and limits
