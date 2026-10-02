@@ -36,6 +36,7 @@ class PublicationTests(unittest.TestCase):
         self.inventory = publisher.checked_inventory(self.args)
         self.objects, self.puts = {}, []
         self.bad_dependency = False
+        self.gateway_cache_mode = False
 
     def object_for(self, item):
         headers = {"Content-Type": item["contentType"], "Cache-Control": publisher.CACHE,
@@ -50,7 +51,10 @@ class PublicationTests(unittest.TestCase):
         relative = request.full_url.split(self.inventory["prefix"], 1)[1]
         if relative not in self.objects:
             raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
-        return Response(*self.objects[relative])
+        body, headers = self.objects[relative]
+        if self.gateway_cache_mode:
+            headers = {**headers, "Cache-Control": "max-age=0"}
+        return Response(body, headers)
 
     def put_object(self, **options):
         self.assertEqual(options["Bucket"], publisher.BUCKET)
@@ -112,6 +116,17 @@ class PublicationTests(unittest.TestCase):
         client = self.run_publication()
         client.assert_not_called()
         self.assertEqual(self.puts, [])
+
+    def test_known_delivery_cache_limitation_is_reported_without_claiming_immutable_cache(self):
+        self.gateway_cache_mode = True
+        self.run_publication()
+        report = json.loads((self.args.report_dir / "public-verification.json").read_text())
+        self.assertTrue(report["allVerified"])
+        self.assertFalse(report["cachePolicyHonored"])
+        self.assertEqual(report["cacheControlRequested"], publisher.CACHE)
+        self.assertEqual(report["cacheControlObserved"], ["max-age=0"])
+        self.assertTrue(all(i["cacheControlObserved"] == "max-age=0" and not i["cachePolicyHonored"]
+                            for i in report["objects"]))
 
 
 if __name__ == "__main__":

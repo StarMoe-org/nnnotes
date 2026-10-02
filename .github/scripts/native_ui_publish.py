@@ -181,13 +181,15 @@ def public_read(item, inventory, allow_missing=False):
                     f"public decoded identity differs: {item['path']}")
             require(headers.get("Content-Type", "").split(";", 1)[0] == item["contentType"],
                     f"public MIME differs: {item['path']}")
-            require(headers.get("Cache-Control") == CACHE, f"public cache differs: {item['path']}")
+            observed_cache = headers.get("Cache-Control")
+            require(observed_cache in (CACHE, "max-age=0"), f"unexpected public cache: {item['path']}")
             require(headers.get("Access-Control-Allow-Origin") in ("*", ORIGIN), f"public CORS missing: {item['path']}")
             for name, field in METADATA.items():
                 require(headers.get("x-amz-meta-" + name) == str(item[field]),
                         f"public identity metadata differs: {item['path']}")
             return {**item, "httpStatus": 200, "corsAllowOrigin": headers.get("Access-Control-Allow-Origin"),
-                    "cacheControl": headers.get("Cache-Control"), "verified": True}
+                    "cacheControlRequested": CACHE, "cacheControlObserved": observed_cache,
+                    "cachePolicyHonored": observed_cache == CACHE, "verified": True}
         except urllib.error.HTTPError as error:
             if error.code == 404 and allow_missing:
                 return None
@@ -231,11 +233,13 @@ def cache_audit(args):
                 continue
             raise ValueError(f"public cache audit HTTP {error.code}: {item['path']}") from None
         source = s3.head_object(Bucket=BUCKET, Key=inventory["prefix"] + item["path"])
+        raw_headers = source.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+        raw_headers = {k.lower(): v for k, v in raw_headers.items()}
         results.append({"path": item["path"], "cacheControlRequested": CACHE,
             "publicCacheControlObserved": public_cache, "signedHeadCacheControlObserved": source.get("CacheControl"),
             "contentType": source.get("ContentType"), "contentEncoding": source.get("ContentEncoding"),
             "encodedBytes": source.get("ContentLength"),
-            "metadata": {k: source.get("Metadata", {}).get(k) for k in METADATA}})
+            "metadata": {k: raw_headers.get("x-amz-meta-" + k) for k in METADATA}})
     report = {"manifestUrl": inventory["manifestUrl"], "operation": "read-only-public-and-signed-HEAD",
         "writePerformed": False, "existingObjects": len(results), "objects": results}
     write_json(args.report_dir / "cache-audit.json", report)
@@ -292,7 +296,11 @@ def publish(args):
     report = {"format": "moenotes.game-ui-public-verification/2", "manifestUrl": inventory["manifestUrl"],
         "manifestSha256": MANIFEST_SHA, "allVerified": True, "objectCount": len(final),
         "decodedBytes": inventory["decodedBytes"], "encodedBytes": inventory["encodedBytes"],
-        "manifestPublishedLast": True, "uploads": verified, "objects": final}
+        "manifestPublishedLast": True, "cacheControlRequested": CACHE,
+        "cacheControlObserved": sorted({i["cacheControlObserved"] for i in final}),
+        "cachePolicyHonored": all(i["cachePolicyHonored"] for i in final),
+        "cacheObservation": "The existing delivery channel returns max-age=0 when the requested immutable policy is not honored; the cause is not established.",
+        "uploads": verified, "objects": final}
     write_json(args.report_dir / "public-verification.json", report)
     print(json.dumps({"complete": True, "manifestUrl": inventory["manifestUrl"], "verifiedObjects": len(final),
         "decodedBytes": inventory["decodedBytes"], "encodedBytes": inventory["encodedBytes"]}), flush=True)

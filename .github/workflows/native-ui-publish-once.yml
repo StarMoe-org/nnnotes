@@ -45,7 +45,13 @@ jobs:
           python .github/scripts/test_native_ui_publish.py \
             --publisher .github/scripts/native_ui_publish.py \
             --bundle "$RUNNER_TEMP/native-ui-work/bundle"
-      - name: Read-only public and signed HEAD cache comparison
+      - name: Read-only preflight of the exact public destination
+        run: |
+          python .github/scripts/native_ui_publish.py publish \
+            --payload "$RUNNER_TEMP/native-ui-work/bundle/encoded-payload" \
+            --inventory "$RUNNER_TEMP/native-ui-work/bundle/publication-inventory.json" \
+            --report-dir "$RUNNER_TEMP/native-ui-work/reports/preflight" --dry-run
+      - name: Publish dependencies, then manifest, with complete public read-back
         env:
           STORY_S3_ACCESS_KEY: ${{ secrets.STORY_S3_ACCESS_KEY }}
           STORY_S3_SECRET_KEY: ${{ secrets.STORY_S3_SECRET_KEY }}
@@ -53,7 +59,7 @@ jobs:
           python .github/scripts/native_ui_publish.py publish \
             --payload "$RUNNER_TEMP/native-ui-work/bundle/encoded-payload" \
             --inventory "$RUNNER_TEMP/native-ui-work/bundle/publication-inventory.json" \
-            --report-dir "$RUNNER_TEMP/native-ui-work/reports/cache-audit" --cache-audit-only
+            --report-dir "$RUNNER_TEMP/native-ui-work/reports/publication"
       - name: Preserve only public identity and transport reports
         if: always()
         uses: actions/upload-artifact@v7
