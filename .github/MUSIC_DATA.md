@@ -25,13 +25,16 @@ published into the story site's bucket under `music-data/` (`https://storage.bdo
 | Object | Content | Cache-Control |
 |---|---|---|
 | `music-data.json` | the current file | `no-cache` |
+| `music-data.json.br` | the current file brotli-compressed (quality 9) | `no-cache` |
 | `jackets/<jacket>.webp` | every song's jacket (`--jackets`), where the page looks for them | `public, max-age=86400` |
 | `archive/<master version>/<sha256>.json` | every published file, kept | `public, max-age=31536000, immutable` |
 | `build.json` | the build marker: the file's SHA-256, size and counts, what it was made from, the gate results, the run | `no-cache` |
 | `replay/<manifest SHA-256>/...` | the SHA-bound deck, 13 Snap label tables, charts and shared engine | versioned directory; never overwrites another manifest's resources |
 
 All JSON is stored with deterministic gzip, `Content-Type: application/json` and `Content-Encoding: gzip` at its
-existing `.json` URL. Manifest SHA-256 and byte counts describe **decoded** bytes. Separate object metadata records
+existing `.json` URL. Alongside it, `music-data.json.br` is compressed with Brotli (quality 9) and published
+with `Content-Encoding: br` and `Content-Type: application/json`.
+Manifest SHA-256 and byte counts describe **decoded** bytes. Separate object metadata records
 `decoded-sha256`, `decoded-bytes`, `encoded-sha256` and `encoded-bytes`; read-back verifies both identities and the
 encoding header. JavaScript, WASM and images retain their original bytes and transport. Browsers decompress JSON
 automatically; Python consumers explicitly decode `Content-Encoding` before checking the manifest's SHA.

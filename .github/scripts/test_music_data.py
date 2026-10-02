@@ -687,14 +687,17 @@ def test_publish_order_and_read_back(tmp_path, monkeypatch):
     keys = [k for k, _, _ in s3.log]
     archive = f"music-data/archive/v-test/{report['sha256']}.json"
     assert sorted(keys[:2]) == ["music-data/jackets/jkt_100001.webp", "music-data/jackets/jkt_100002.webp"]
-    assert keys[2:] == [archive, "music-data/music-data.json", "music-data/build.json"]
+    assert keys[2:] == [archive, "music-data/music-data.json", "music-data/music-data.json.br", "music-data/build.json"]
     caches = {k: c for k, c, _ in s3.log}
     assert caches[archive].endswith("immutable") and caches["music-data/music-data.json"] == "no-cache"
+    assert caches["music-data/music-data.json.br"] == "no-cache"
     assert music_data.http_compression.decode_content(s3.store["music-data/music-data.json"], "gzip") == (out / "music-data.json").read_bytes()
     assert s3.headers["music-data/music-data.json"]["ContentEncoding"] == "gzip"
+    assert music_data.http_compression.decode_content(s3.store["music-data/music-data.json.br"], "br") == (out / "music-data.json").read_bytes()
+    assert s3.headers["music-data/music-data.json.br"]["ContentEncoding"] == "br"
     s3.log.clear()
     music_data.cmd_publish(str(out))                          # again: the jackets and the archive copy are there
-    assert [k for k, _, _ in s3.log] == ["music-data/music-data.json", "music-data/build.json"]
+    assert [k for k, _, _ in s3.log] == ["music-data/music-data.json", "music-data/music-data.json.br", "music-data/build.json"]
     monkeypatch.setenv("FORCE", "true")
     s3.log.clear()
     music_data.cmd_publish(str(out), dry_run=True)
@@ -801,8 +804,8 @@ def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatc
     music_data.cmd_publish(str(out))
     keys = [k for k, _, _ in s3.log]
     runtime = ["music-data/" + p.relative_to(out).as_posix() for p in paths]
-    assert keys[-3:] == [runtime[-1], "music-data/music-data.json", "music-data/build.json"]
-    assert set(runtime[:-1]).issubset(keys[:-3])
+    assert keys[-4:] == [runtime[-1], "music-data/music-data.json", "music-data/music-data.json.br", "music-data/build.json"]
+    assert set(runtime[:-1]).issubset(keys[:-4])
     types = {k: mime for k, _, mime in s3.log}
     assert types[replay_key(doc, "engine/ournotes_replay_bg.wasm")] == "application/wasm"
 
@@ -919,6 +922,7 @@ def test_replay_read_back_failure_stops_before_runtime_pointer(tmp_path, monkeyp
         music_data.cmd_publish(str(out))
     assert replay_key(doc, "manifest.json") not in s3.store
     assert "music-data/music-data.json" not in s3.store
+    assert "music-data/music-data.json.br" not in s3.store
     assert "music-data/build.json" not in s3.store
 
 
@@ -930,7 +934,7 @@ def test_parallel_payload_readbacks_finish_before_any_pointer(tmp_path, monkeypa
     paths = music_data.replay_resources(out, doc)
     archive = json.loads((out / music_data.MARKER).read_bytes())["archive"]
     payloads = {archive, *(p.relative_to(out).as_posix() for p in paths[:-1])}
-    pointers = [paths[-1].relative_to(out).as_posix(), music_data.FILE, music_data.MARKER]
+    pointers = [paths[-1].relative_to(out).as_posix(), music_data.FILE, music_data.FILE_BR, music_data.MARKER]
     if corrupt:
         key = archive if corrupt == "archive" else replay_key(doc, "engine/ournotes_replay_bg.wasm").removeprefix("music-data/")
         s3.corrupt = "music-data/" + key
@@ -958,7 +962,7 @@ def test_parallel_payload_readbacks_finish_before_any_pointer(tmp_path, monkeypa
     else:
         music_data.cmd_publish(str(out))
         assert payloads <= verified
-        assert [key for key, _, _ in s3.log][-3:] == ["music-data/" + key for key in pointers]
+        assert [key for key, _, _ in s3.log][-len(pointers):] == ["music-data/" + key for key in pointers]
 
 
 @pytest.mark.parametrize("change", ["wrong-head", "untracked-source", "changed-during-build", None])

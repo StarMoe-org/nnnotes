@@ -53,7 +53,7 @@ BUILD_FORMAT = "moenotes.music-data-build/1"
 # This script's own version of a build: bump it when what it builds or publishes changes, so that the next run builds
 # although the master data, the deck model and nnnotes are the same.
 RECIPE = 5
-FILE, MARKER, JACKETS, ARCHIVE = "music-data.json", "build.json", "jackets/", "archive/"
+FILE, FILE_BR, MARKER, JACKETS, ARCHIVE = "music-data.json", "music-data.json.br", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
 SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
 SCHEMA = Path("docs/schema/music-data.schema.json")
@@ -337,6 +337,9 @@ def cmd_build(out: str) -> None:
         status = subprocess.run(cmd, stdout=f).returncode
     if status:
         fail(f"nnnotes music-data exited with {status}")
+    raw = (o / FILE).read_bytes()
+    import brotli
+    (o / FILE_BR).write_bytes(brotli.compress(raw, quality=9))
     r = json.loads((o / "music-data.summary.json").read_text(encoding="utf-8"))
     summary(f"- built: {r.get('songs')} songs, {r.get('charts')} charts, {r.get('jackets')} jackets, deck "
             f"{short(r.get('deck'))}, {r.get('bytes')} bytes, sha256 {short(r.get('sha256'))}")
@@ -1411,9 +1414,24 @@ def cmd_check(out: str, master: str, page: str) -> None:
 # ---------------------------------------------------------------- publish
 def upload(b, key: str, src: Path, cache: str) -> None:
     types = {".wasm":"application/wasm", ".js":"text/javascript"}
-    extra = {"ContentType": types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream")),
-             "CacheControl": cache}
-    if src.suffix.lower() == ".json":
+    if key.lower().endswith(".json.br") or src.name.lower().endswith(".json.br"):
+        content_type = "application/json"
+    else:
+        content_type = types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream"))
+    extra = {"ContentType": content_type, "CacheControl": cache}
+    if key.lower().endswith(".json.br") or src.name.lower().endswith(".json.br"):
+        if src.name.lower().endswith(".json.br"):
+            raw_br = src.read_bytes()
+            import brotli
+            decoded = brotli.decompress(raw_br)
+            _, transport = http_compression.encode_brotli(decoded, quality=9)
+            transport["Metadata"]["encoded-sha256"] = http_compression.digest(raw_br)
+            transport["Metadata"]["encoded-bytes"] = str(len(raw_br))
+            b.s3.upload_fileobj(io.BytesIO(raw_br), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
+        else:
+            encoded, transport = http_compression.encode_brotli(src.read_bytes(), quality=9)
+            b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
+    elif src.suffix.lower() == ".json":
         encoded, transport = http_compression.encode_json(src.read_bytes())
         b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
     else:
@@ -1422,26 +1440,27 @@ def upload(b, key: str, src: Path, cache: str) -> None:
 
 def read_back(b, key: str, digest: str) -> None:
     """Verify stored encoding/metadata and decoded SHA before advancing a public pointer."""
-    compressed_json = key.lower().endswith(".json")
+    compressed_json = key.lower().endswith(".json") or key.lower().endswith(".json.br")
+    expected_encoding = "br" if key.lower().endswith(".json.br") else ("gzip" if compressed_json else None)
     try:
         # This is the consumer's actual response, with the same complete transport contract.
         # Some signed SDK responses fail this contract; retrying them need not delay a valid public response.
         http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
-                                       compressed_json=compressed_json)
+                                       compressed_json=compressed_json, expected_encoding=expected_encoding)
         return
     except (urllib.error.URLError, ValueError, OSError) as e:
         print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     for attempt in range(4):
         try:
             http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest,
-                                           compressed_json=compressed_json)
+                                           compressed_json=compressed_json, expected_encoding=expected_encoding)
             return
         except Exception as e:                       # Cloudflare in front of the store rejects a signed GET at times
             print(f"read back {key}: {type(e).__name__}", flush=True)
         time.sleep(3 * (attempt + 1))
     try:
         http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
-                                       compressed_json=compressed_json)
+                                       compressed_json=compressed_json, expected_encoding=expected_encoding)
         return
     except (urllib.error.URLError, ValueError, OSError) as e:
         print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
@@ -1460,6 +1479,10 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
         dry_run = True
     o = Path(out)
     raw = (o / FILE).read_bytes()
+    br_path = o / FILE_BR
+    if not br_path.is_file() or br_path.stat().st_size == 0:
+        import brotli
+        br_path.write_bytes(brotli.compress(raw, quality=9))
     report = json.loads((o / "check.json").read_text(encoding="utf-8"))
     if not report.get("passed") or report.get("sha256") != sha256(raw) or not (o / MARKER).is_file():
         fail("the file has not passed the gates (check.json): nothing is published")
@@ -1495,7 +1518,11 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
         steps.append((marker["archive"], o / FILE, ARCHIVE_CACHE, True))
     steps += [(p.relative_to(o.resolve()).as_posix(), p, FILE_CACHE, True) for p in runtime]
     # the file before the marker that names it, the jackets and the archive copy before the file
-    steps += [(FILE, o / FILE, FILE_CACHE, True), (MARKER, o / MARKER, FILE_CACHE, True)]
+    steps += [
+        (FILE, o / FILE, FILE_CACHE, True),
+        (FILE_BR, o / FILE_BR, FILE_CACHE, True),
+        (MARKER, o / MARKER, FILE_CACHE, True),
+    ]
     if dry_run or not publishing():
         for key, _, _, _ in steps:
             print(f"would upload {b.prefix}{key}")
@@ -1504,11 +1531,12 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
         checked = [s for s in steps if s[3]]
         # replay_resources puts its manifest last. Every independent payload must
         # upload AND read back successfully before manifest, file and marker.
-        barriers = 3 if runtime else 2
+        barriers = 4 if runtime else 3
         def upload_checked(step):
             key, src, cache, _ = step
             upload(b, key, src, cache)
-            read_back(b, key, sha256(src.read_bytes()))
+            digest = marker["sha256"] if key in (FILE, FILE_BR, marker.get("archive")) else sha256(src.read_bytes())
+            read_back(b, key, digest)
         story_site.parallel(upload_checked, checked[:-barriers], workers=8)
         for step in checked[-barriers:]:
             if step[0] == FILE:
@@ -1517,7 +1545,7 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
             upload_checked(step)
     summary(f"- {'would publish' if dry_run else 'published'} {len(new)} jackets (of {len(jackets)}), "
             f"{'the archive copy, ' if not archived else ''}{FILE} ({len(raw)} bytes, sha256 "
-            f"{short(marker['sha256'])}), {MARKER}: {public_url(FILE)}")
+            f"{short(marker['sha256'])}), {FILE_BR}, {MARKER}: {public_url(FILE)}")
 
 
 def main(argv: list[str]) -> None:

@@ -69,8 +69,9 @@ def test_publisher_uses_the_real_bucket_contract_instead_of_a_fake_listing_api(t
     assert not hasattr(bucket, "keys")
     monkeypatch.setattr(md, "bucket", lambda: bucket)
     md.cmd_publish(str(out))
-    assert "music-data/music-data.json" in s3.store and "music-data/build.json" in s3.store
+    assert "music-data/music-data.json" in s3.store and "music-data/music-data.json.br" in s3.store and "music-data/build.json" in s3.store
     assert bucket.object_size("music-data.json") == len(s3.store["music-data/music-data.json"])
+    assert bucket.object_size("music-data.json.br") == len(s3.store["music-data/music-data.json.br"])
 
 
 def test_same_size_corrupt_archive_is_restored_and_verified_before_any_pointer(tmp_path, monkeypatch):
@@ -83,9 +84,23 @@ def test_same_size_corrupt_archive_is_restored_and_verified_before_any_pointer(t
     assert len(previous) == len(s3.store[archive])
     monkeypatch.setattr(transport, "get_object", lambda url, **kwargs: s3.get_object(Bucket="moenotes", Key="music-data/" + url.split("/music-data/", 1)[1]))
     md.cmd_publish(str(out))
-    assert [key for key, _, _ in s3.log] == [archive, "music-data/music-data.json", "music-data/build.json"]
+    assert [key for key, _, _ in s3.log] == [archive, "music-data/music-data.json", "music-data/music-data.json.br", "music-data/build.json"]
     assert s3.store[archive] == previous
     transport.verify_object(s3.get_object(Bucket="moenotes", Key=archive), report["sha256"], compressed_json=True)
+
+
+def test_brotli_transport_encodes_and_decodes_cleanly():
+    import brotli
+    raw = b'{"hello":"world","list":' + json.dumps(list(range(500))).encode() + b'}'
+    encoded, transport_meta = transport.encode_brotli(raw, quality=9)
+    assert transport_meta["ContentEncoding"] == "br"
+    assert int(transport_meta["Metadata"]["decoded-bytes"]) == len(raw)
+    assert int(transport_meta["Metadata"]["encoded-bytes"]) == len(encoded)
+    assert brotli.decompress(encoded) == raw
+    assert transport.decode_content(encoded, "br") == raw
+    obj = {"Body": io.BytesIO(encoded), "ContentType": "application/json", **transport_meta}
+    facts = transport.verify_object(obj, md.sha256(raw), compressed_json=True, expected_encoding="br")
+    assert facts["decoded-sha256"] == md.sha256(raw)
 
 
 @pytest.mark.parametrize("defect", ["missing-encoding", "wrong-type", "wrong-size", "wrong-stored-sha", "wrong-decoded-sha", "corrupt-body"])
