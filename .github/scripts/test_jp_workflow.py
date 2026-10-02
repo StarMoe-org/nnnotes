@@ -144,9 +144,8 @@ def test_regions_command_reads_the_event(tmp_path, monkeypatch):
 
 def test_music_data_workflow_configures_jp_vpn():
     workflow = (Path(__file__).resolve().parents[1] / "workflows" / "music-data-region.yml").read_text(encoding="utf-8")
-    assert "jp_vpngate.py start" in workflow
+    assert "jp_vpngate.py watch" in workflow
     assert "jp_vpngate.py stop" in workflow
     assert "inputs.region == 'jp'" in workflow
     assert "openvpn" in workflow
     assert "test_jp_vpngate.py" in workflow
-

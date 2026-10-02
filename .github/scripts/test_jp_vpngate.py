@@ -60,10 +60,12 @@ def test_selects_ranked_japanese_relays_with_valid_public_addresses():
     assert [item["IP"] for item in result] == ["219.100.37.2", "219.100.37.1"]
 
 
-def test_selection_limits_connection_attempts():
-    result = jp_vpngate.relays(listing([row(ip=f"219.100.37.{i}", score=i) for i in range(1, 10)]))
-    assert len(result) == jp_vpngate.LIMIT
-    assert result[0]["score"] == 9
+@pytest.mark.parametrize("count", [3, jp_vpngate.LIMIT, jp_vpngate.LIMIT + 3])
+def test_selection_limits_connection_attempts(count):
+    result = jp_vpngate.relays(listing([row(ip=f"219.100.37.{index}", score=index)
+                                      for index in range(1, count + 1)]))
+    assert len(result) == min(count, jp_vpngate.LIMIT)
+    assert [item["score"] for item in result] == list(range(count, max(0, count - jp_vpngate.LIMIT), -1))
 
 
 def test_profile_uses_only_selected_host_routes_and_ignores_supplied_hooks():
