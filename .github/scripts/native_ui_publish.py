@@ -216,6 +216,32 @@ def s3_client(profile):
     return session.client("s3", endpoint_url=ENDPOINT, region_name="us-east-1", config=config)
 
 
+def cache_audit(args):
+    inventory = checked_inventory(args)
+    s3 = s3_client(args.profile)
+    results = []
+    for item in inventory["objects"]:
+        url = inventory["manifestUrl"].removesuffix("manifest.json") + item["path"]
+        try:
+            request = urllib.request.Request(url, method="HEAD", headers={"Origin": ORIGIN})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                public_cache = response.headers.get("Cache-Control")
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                continue
+            raise ValueError(f"public cache audit HTTP {error.code}: {item['path']}") from None
+        source = s3.head_object(Bucket=BUCKET, Key=inventory["prefix"] + item["path"])
+        results.append({"path": item["path"], "cacheControlRequested": CACHE,
+            "publicCacheControlObserved": public_cache, "signedHeadCacheControlObserved": source.get("CacheControl"),
+            "contentType": source.get("ContentType"), "contentEncoding": source.get("ContentEncoding"),
+            "encodedBytes": source.get("ContentLength"),
+            "metadata": {k: source.get("Metadata", {}).get(k) for k in METADATA}})
+    report = {"manifestUrl": inventory["manifestUrl"], "operation": "read-only-public-and-signed-HEAD",
+        "writePerformed": False, "existingObjects": len(results), "objects": results}
+    write_json(args.report_dir / "cache-audit.json", report)
+    print(json.dumps(report), flush=True)
+
+
 def publish(args):
     inventory = checked_inventory(args)
     items = inventory["objects"]
@@ -285,9 +311,15 @@ def main():
     put.add_argument("--report-dir", type=Path, required=True)
     put.add_argument("--profile")
     put.add_argument("--dry-run", action="store_true")
+    put.add_argument("--cache-audit-only", action="store_true")
     args = parser.parse_args()
     try:
-        prepare(args) if args.command == "prepare" else publish(args)
+        if args.command == "prepare":
+            prepare(args)
+        elif args.cache_audit_only:
+            cache_audit(args)
+        else:
+            publish(args)
     except Exception as error:
         report = {"complete": False, "errorType": type(error).__name__}
         code = getattr(error, "response", {}).get("Error", {}).get("Code")
