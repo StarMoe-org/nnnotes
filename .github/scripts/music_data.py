@@ -148,17 +148,17 @@ def exists(key: str) -> bool:
 
 # ---------------------------------------------------------------- the inputs of a build
 def deck_commit(root: Path = Path(".")) -> str:
-    """The ournotes-deck commit nnnotes builds its deck model with (rust/Cargo.lock)."""
+    """The ournotes-deck commit nnnotes builds its deck model with: the ournotes-sim package in rust/Cargo.lock."""
     lock = root / "rust" / "Cargo.lock"
     if not lock.is_file():
         fail("no rust/Cargo.lock: this nnnotes has no music-data command with the deck model (sync the fork with "
              "upstream, .github/MUSIC_DATA.md)")
     for block in lock.read_text(encoding="utf-8").split("[[package]]"):
-        if re.search(r'^name = "ournotes-deck"$', block, re.M):
+        if re.search(r'^name = "ournotes-sim"$', block, re.M):
             m = re.search(r'^source = "git\+[^"#]*#([0-9a-f]{40})"$', block, re.M)
             if m:
                 return m.group(1)
-    fail("rust/Cargo.lock has no ournotes-deck git commit")
+    fail("rust/Cargo.lock has no ournotes-sim git commit")
 
 
 def nnnotes_commit(root: Path = Path(".")) -> str:
@@ -355,7 +355,7 @@ def build_replay_engine(out: Path) -> Path:
     def check_source():
         head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         changed = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=all",
-                                            "--", "Cargo.toml", "Cargo.lock", "src", "wasm/replay"], text=True).strip()
+                                            "--", "Cargo.toml", "Cargo.lock", "crates", "wasm/replay"], text=True).strip()
         if head != pinned or changed:
             fail("replay model source is dirty or differs from nnnotes' pinned deck commit")
     check_source()
