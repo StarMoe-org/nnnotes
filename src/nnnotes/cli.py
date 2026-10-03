@@ -72,6 +72,7 @@ AUDIO_CHOICES = ("flac", "ogg", "wav")
 FLAG_SETTINGS = {
     ("catalog", "region"): ("region", "--region"),
     ("catalog", "language"): ("language", "--language"),
+    ("catalog", "version"): ("catalog_release", "--catalog-release"),
     ("paths", "catalog"): ("catalog", "--catalog"),
     ("paths", "cache"): ("cache", "--cache"),
     ("paths", "master"): ("master", "--master"),
@@ -111,10 +112,10 @@ def _existing(cfg: Config, section: str, key: str, kind: str = "file") -> Path |
 
 def open_catalog(cfg: Config, bundles: bool = True, region: str | None = None) -> Catalog:
     """The catalog of [catalog] language (merged with the APK's when [paths] apk is set), fetching from the CDN of
-    `region` (default: [catalog] region); the regions serve the same catalog for a language, so one cached file
-    serves them all. `bundles`: bundles will be fetched; else only the catalog is read. The region, its CDN base
-    and the bundle key are read from the settings only when something must be downloaded (every file in the cache:
-    none of them is needed), then a missing one is a ConfigError naming the setting."""
+    `region` (default: [catalog] region). International versioned catalogs are isolated by CDN root and resource
+    version. `bundles`: bundles will be fetched; else only the catalog is read. Explicit files bypass discovery.
+    Version pins bypass the API but need the CDN root to identify the cache; legacy main keeps lazy CDN lookup.
+    The bundle key is only read for a missing encrypted bundle."""
     if region:
         cfg = cfg.for_region(region)
     cache = cfg.require_path("paths", "cache")
@@ -129,7 +130,7 @@ def open_catalog(cfg: Config, bundles: bool = True, region: str | None = None) -
     key = (lambda: bundle_key(cfg)) if bundles else None
     if catbin is not None:
         return Catalog(catbin.read_bytes(), cache, cdn=cdn, bundle_key=key, apk=apk)
-    return Catalog.load(language, cache, cdn=cdn, bundle_key=key, apk=apk)
+    return Catalog.load(language, cache, cdn=cdn, bundle_key=key, apk=apk, version=cfg.catalog_version())
 
 
 def master_dir(cfg: Config, region: str | None = None) -> Path:
@@ -758,6 +759,11 @@ def _out(c, what: str, required: bool = True) -> None:
     c.add_argument("-o", "--out", required=required, help=what)
 
 
+def cmd_ui(args, cfg):
+    from . import ui
+    ui.command(args, cfg)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="nnnotes", description="BanG Dream! Our Notes data toolkit")
     p.add_argument("--version", action="version", version=f"nnnotes {__version__}")
@@ -766,6 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--language", help="catalog and client language: ja, en, zh-Hant, zh-Hans or ko "
                                       "([catalog] language)")
     p.add_argument("--catalog", help="catalog .bin file ([paths] catalog; else downloaded into the cache)")
+    p.add_argument("--catalog-release", help="pin an international resource version ([catalog] version; else API discovery when configured, otherwise main)")
     p.add_argument("--cache", help="cache directory ([paths] cache)")
     p.add_argument("--master", help="decoded master data directory ([paths] master)")
     p.add_argument("--apk", help="base.apk ([paths] apk)")
@@ -1003,6 +1010,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     cli_assets.register(sub, argparse.Namespace(open_catalog=open_catalog, print_json=_print_json))
     voices.register(sub, argparse.Namespace(open_catalog=open_catalog, master_dir=master_dir))
+    c = sub.add_parser("ui", help="export an offline UI prefab library for ournotes-player/ui")
+    _out(c, "UI data directory outside the source repositories")
+    c.add_argument("--key", action="append", help="exact APK catalog key (repeatable)")
+    c.add_argument("--prefix", default="EmbUI/", help="APK UI key prefix (default EmbUI/)")
+    c.add_argument("--limit", type=int, help="maximum number of keys")
+    c.add_argument("--no-dependencies", action="store_true", help="omit additional prefab roots and controllers")
+    c.add_argument("--force", action="store_true", help="re-export the selected keys")
+    c.set_defaults(func=cmd_ui, usage=c.error)
     return p
 
 
