@@ -1,0 +1,135 @@
+name: Recognition gallery
+
+# Keeps the screenshot recognition gallery of MoeNotes' card box current. A run takes the union of the Member and Snap
+# cards of every enabled region's master data (moenotes-masterdata-sync), each card's artwork from the asset service
+# (SHA-256 and size checked) and the pinned runtime (OpenCV, ONNX Runtime and the field model, recognition-runtime.json),
+# computes the gallery's SIFT features and publishes everything content-addressed into the story site's bucket
+# (assets/<sha256>.<ext>): dependencies first, then the gallery and field manifests, then the bundle manifest that lists
+# them all, and last the small pointer recognition/current.json that names the bundle. Nothing is deleted or overwritten;
+# a catalog that lacks a published card, or any artwork that fails its check, leaves the pointer where it is.
+#
+# Triggers: moenotes-masterdata-sync's repository_dispatch `masterdata-updated`, a daily schedule in case a dispatch was
+# missed, and workflow_dispatch (force: build although the inputs are unchanged; dry_run). Publishing switch: the
+# repository variable RECOGNITION_PUBLISH (unset: every run is a dry run). docs: .github/RECOGNITION.md
+
+on:
+  repository_dispatch:
+    types: [masterdata-updated]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "build and publish although the catalog, artwork and runtime pins are those of the published bundle"
+        type: boolean
+        default: false
+      dry_run:
+        description: "build and check, then list what would be uploaded instead of uploading"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "53 3 * * *"
+
+permissions:
+  contents: read
+
+# One publisher at a time: a bundle may only advance the pointer from the bundle it was built on.
+concurrency:
+  group: recognition-gallery
+  cancel-in-progress: false
+
+env:
+  STORY_S3_ENDPOINT: ${{ vars.STORY_S3_ENDPOINT || 'https://storage.bdon.moe' }}
+  STORY_S3_BUCKET: ${{ vars.STORY_S3_BUCKET || 'moenotes' }}
+  RECOGNITION_S3_PREFIX: ${{ vars.RECOGNITION_S3_PREFIX || '' }}
+  RECOGNITION_REGIONS: ${{ vars.RECOGNITION_REGIONS || 'hk-tw-mo en kr jp' }}
+  RECOGNITION_ASSET_API: ${{ vars.RECOGNITION_ASSET_API || 'https://assets.bdon.moe' }}
+  MASTERDATA_BASE_URL: ${{ vars.MASTERDATA_BASE_URL || 'https://metadata.bdon.moe' }}
+  # The publishing switch and this run's choice: anything but a publishing run gets no bucket key.
+  RECOGNITION_WRITE: ${{ vars.RECOGNITION_PUBLISH == 'true' && github.event.inputs.dry_run != 'true' }}
+  PYTHON_VERSION: "3.13"
+  WORK: ${{ github.workspace }}/recognition-work
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      runtime: ${{ steps.plan.outputs.runtime }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Catalog and artwork against the published bundle
+        id: plan
+        env:
+          FORCE: ${{ github.event.inputs.force == 'true' }}
+        run: python .github/scripts/recognition.py plan
+
+  runtime:
+    # Only while a pinned runtime file is missing from the bucket (the first run, or after a pin changes).
+    needs: plan
+    if: needs.plan.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write          # draft release assets are visible to tokens with push access only
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: S3 SDK
+        run: python -m pip install --quiet boto3
+      - name: Pinned runtime files from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STORY_S3_ACCESS_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_ACCESS_KEY || '' }}
+          STORY_S3_SECRET_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_SECRET_KEY || '' }}
+        run: >-
+          python .github/scripts/recognition.py runtime --work "$WORK/runtime" --report "$WORK/reports/runtime.json"
+          ${{ env.RECOGNITION_WRITE != 'true' && '--dry-run' || '' }}
+      - name: Preserve the report (public identities only)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recognition-runtime-report
+          if-no-files-found: warn
+          path: ${{ env.WORK }}/reports/
+
+  build:
+    needs: [plan, runtime]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.build == 'true' && (needs.runtime.result == 'success' || needs.runtime.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Pinned feature extraction libraries
+        run: |
+          python -m pip install --quiet --only-binary=:all: boto3 pytest $(python .github/scripts/recognition.py requirements)
+      - name: Self-test
+        run: python -m pytest -q -p no:cacheprovider .github/scripts/test_recognition.py
+      - name: Build
+        run: python .github/scripts/recognition.py build "$WORK/out"
+      - name: Publish
+        # Read-only preflight first; a dry run (the dry_run input, or RECOGNITION_PUBLISH off) stops after it.
+        env:
+          STORY_S3_ACCESS_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_ACCESS_KEY || '' }}
+          STORY_S3_SECRET_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_SECRET_KEY || '' }}
+        run: python .github/scripts/recognition.py publish "$WORK/out" ${{ env.RECOGNITION_WRITE != 'true' && '--dry-run' || '' }}
+      - name: Preserve the reports (public identities only, no artwork or features)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recognition-reports
+          if-no-files-found: warn
+          path: |
+            ${{ env.WORK }}/out/report.json
+            ${{ env.WORK }}/out/publication.json
+            ${{ env.WORK }}/out/failure.json
+            ${{ env.WORK }}/out/site/recognition/current.json

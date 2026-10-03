@@ -1,0 +1,43 @@
+{
+  "format": "moenotes.recognition-runtime/1",
+  "release": "recognition-runtime-1",
+  "source": "https://github.com/empty-sekai/ournotes-boxlens/tree/v0.1.0",
+  "files": {
+    "opencv/opencv.js": {
+      "sha256": "790f28c4c056a413897b767d91bc4e84840f0eae22b9368816d3bc1c1db883ef",
+      "bytes": 154278,
+      "ext": "js"
+    },
+    "opencv/opencv_js.wasm": {
+      "sha256": "6dadf5f9187a1cc740b7e81318dea1ee0dc8714405409203431d7b6137209313",
+      "bytes": 3313244,
+      "ext": "wasm"
+    },
+    "fields/ort.wasm.min.js": {
+      "sha256": "faece07e84faa9001f5104bbe4e5c70861d06cb2376a0dea1fa0ad33a67adc81",
+      "bytes": 50196,
+      "ext": "js"
+    },
+    "fields/ort-wasm-simd-threaded.mjs": {
+      "sha256": "e13f7f94fc51b4ca72b12faeb1ee95f4ace6dfbc8939bc718aabdc0a27c4299b",
+      "bytes": 24381,
+      "ext": "mjs"
+    },
+    "fields/ort-wasm-simd-threaded.wasm": {
+      "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2",
+      "bytes": 14239897,
+      "ext": "wasm"
+    },
+    "fields/fields.onnx": {
+      "sha256": "768889db7b475dce28ed949299d2e7a624faa3ee18f3c28bb22deac2bcdd1a8d",
+      "bytes": 1356782,
+      "ext": "onnx"
+    }
+  },
+  "galleries": {
+    "gallery": {
+      "builder": "sift-rootsift/1",
+      "requirements": ["opencv-python-headless==5.0.0.93", "numpy==2.4.3", "Pillow==12.1.1"]
+    }
+  }
+}
