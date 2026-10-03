@@ -90,7 +90,7 @@ A **text** is an object with one string per language of `languages` (`{"ja": ...
 |---|---|
 | `region` | the region whose master data this is (a configured region name), or `embedded` for the APK's master data |
 | `client.versionName`, `client.versionCode` | the APK's version name and code (null without `[paths] apk`) |
-| `catalog.resourceVersion` | the resource version recorded for the catalog in the catalog store (`nnnotes catalogs fetch` / `import`), null when none is recorded |
+| `catalog.resourceVersion` | the resource version used to select the downloaded catalog, or recorded for an explicit file in the catalog store (`nnnotes catalogs fetch` / `import`); null when unknown |
 | `catalog.sha256` | SHA-256 of the remote catalog file the charts were read with |
 | `master.source` | `api` (`--master-files`, `--decoded-master`: the region's files) or `embedded` (`--apk-master`) |
 | `master.version` | the `version` of the master data manifest |
@@ -351,11 +351,12 @@ column their rows have, in the order the rows first have them; when such a table
 | `MasterSupportCardRank` | `_id` `_group` `_rank` `_limitLevel` `_cardTypeLinkBonusRate` `_supportSkill01Level` `_supportSkill02Level` `_gekisouSupportSkill01Level` `_gekisouSupportSkill02Level` |
 | `MasterCharacter` | `_id` `_bandID` |
 | `MasterBand` | `_id` |
-| `MasterCharacterRank` | `_id` `_rank` `_bonus` |
+| `MasterCharacterRank` | `_id` `_rank` `_exp` `_bonus` |
 | `MasterCharacterTotalRank` | `_id` `_totalRank` `_bonus` |
 | `MasterBandItemSkillEffect` | `_id` `_bandItemId` `_level` `_skillTargetIDs` `_skillEffectType` `_effectValue` |
 | `MasterBandItem` | `_id` `_bandId` |
 | `MasterBandItemLevel` | `_id` `_bandItemId` `_level` `_playerRank` |
+| `MasterVip` | `_id` `_vipRank` |
 | `MasterVipRankBonus` | `_id` `_vipRank` `_vipBonusType` `_value` |
 | `MasterMemoryMusicGroup` | `_id` `_skillTargetIds` |
 | `MasterMemoryMusic` | `_id` `_groupId` |

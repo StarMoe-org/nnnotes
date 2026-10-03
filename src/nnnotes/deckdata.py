@@ -63,11 +63,12 @@ TABLES: tuple[tuple[str, tuple[str, ...] | None], ...] = tuple(
                               "_supportSkill02Level _gekisouSupportSkill01Level _gekisouSupportSkill02Level"),
     ("MasterCharacter", "_id _bandID"),
     ("MasterBand", "_id"),
-    ("MasterCharacterRank", "_id _rank _bonus"),
+    ("MasterCharacterRank", "_id _rank _exp _bonus"),
     ("MasterCharacterTotalRank", "_id _totalRank _bonus"),
     ("MasterBandItemSkillEffect", "_id _bandItemId _level _skillTargetIDs _skillEffectType _effectValue"),
     ("MasterBandItem", "_id _bandId"),
     ("MasterBandItemLevel", "_id _bandItemId _level _playerRank"),
+    ("MasterVip", "_id _vipRank"),
     ("MasterVipRankBonus", "_id _vipRank _vipBonusType _value"),
     ("MasterMemoryMusicGroup", "_id _skillTargetIds"),
     ("MasterMemoryMusic", "_id _groupId"),
@@ -384,7 +385,7 @@ def catalog_info(cat, store_root=None) -> dict:
     """{resourceVersion, sha256} of a catalog's remote catalog file (resource_version)."""
     sha = hashlib.sha256(cat.sources()["remote"]).hexdigest()
     source = getattr(cat, "source", None)
-    return {"resourceVersion": source.version if source else resource_version(store_root, sha), "sha256": sha,
+    return {"resourceVersion": source.version if source else (getattr(cat, "resource_version", None) or resource_version(store_root, sha)), "sha256": sha,
             **({"resourceHash": source.hash} if source else {})}
 
 
