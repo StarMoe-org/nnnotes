@@ -78,7 +78,7 @@ extend the existing linear plain-skill UI domain or derive source rank threshold
 1. **plan** (seconds): the inputs of a build, from `index.json` of moenotes-masterdata-sync (the snapshot's master
    data version, resource version, client version, manifest hash and decoded file-inventory hash of the selected region)
    and the checkout (the
-   ournotes-deck commit `rust/Cargo.lock` pins, the last nnnotes commit that changed `src/`, `rust/` or
+   ournotes-deck commit `rust/Cargo.lock` pins for the `ournotes-sim` package, the last nnnotes commit that changed `src/`, `rust/` or
    `pyproject.toml`, consumer repository/ref and `RECIPE` of `music_data.py`), against `inputs` of the published `build.json`. The same
    inputs (and a published `music-data.json`): the run ends here. `force` builds anyway.
 2. **build**:

@@ -556,7 +556,7 @@ def test_report_markdown(tmp_path):
 def test_deck_commit_from_cargo_lock(tmp_path):
     lock = tmp_path / "rust" / "Cargo.lock"
     lock.parent.mkdir()
-    lock.write_text('[[package]]\nname = "pyo3"\nversion = "0.29.0"\n\n[[package]]\nname = "ournotes-deck"\n'
+    lock.write_text('[[package]]\nname = "pyo3"\nversion = "0.29.0"\n\n[[package]]\nname = "ournotes-sim"\n'
                     'version = "0.0.1"\nsource = "git+https://github.com/empty-sekai/ournotes-deck?rev=' + "a" * 40
                     + "#" + "b" * 40 + '"\n', encoding="utf-8")
     assert music_data.deck_commit(tmp_path) == "b" * 40
