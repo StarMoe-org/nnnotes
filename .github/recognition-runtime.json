@@ -1,43 +1,153 @@
 {
-  "format": "moenotes.recognition-runtime/1",
-  "release": "recognition-runtime-1",
-  "source": "https://github.com/empty-sekai/ournotes-boxlens/tree/v0.1.0",
+  "format": "moenotes.recognition-runtime/2",
+  "release": "recognition-runtime-2",
+  "source": "https://github.com/empty-sekai/ournotes-boxlens/releases/tag/v0.2.0",
   "files": {
-    "opencv/opencv.js": {
-      "sha256": "790f28c4c056a413897b767d91bc4e84840f0eae22b9368816d3bc1c1db883ef",
-      "bytes": 154278,
-      "ext": "js"
-    },
-    "opencv/opencv_js.wasm": {
-      "sha256": "6dadf5f9187a1cc740b7e81318dea1ee0dc8714405409203431d7b6137209313",
-      "bytes": 3313244,
-      "ext": "wasm"
-    },
-    "fields/ort.wasm.min.js": {
+    "runtime/ort.wasm.min.js": {
       "sha256": "faece07e84faa9001f5104bbe4e5c70861d06cb2376a0dea1fa0ad33a67adc81",
       "bytes": 50196,
       "ext": "js"
     },
-    "fields/ort-wasm-simd-threaded.mjs": {
+    "runtime/ort-wasm-simd-threaded.mjs": {
       "sha256": "e13f7f94fc51b4ca72b12faeb1ee95f4ace6dfbc8939bc718aabdc0a27c4299b",
       "bytes": 24381,
       "ext": "mjs"
     },
-    "fields/ort-wasm-simd-threaded.wasm": {
+    "runtime/ort-wasm-simd-threaded.wasm": {
       "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2",
       "bytes": 14239897,
       "ext": "wasm"
     },
-    "fields/fields.onnx": {
-      "sha256": "768889db7b475dce28ed949299d2e7a624faa3ee18f3c28bb22deac2bcdd1a8d",
-      "bytes": 1356782,
+    "models/locator.onnx": {
+      "sha256": "f160f2a5022a9ff1295426014bd03a76815d42a0bba8826dda93d8dc54120ec6",
+      "bytes": 11675830,
       "ext": "onnx"
+    },
+    "models/member-encoder.onnx": {
+      "sha256": "e2110efcbef161a7f0783841d07be6f7da742ccd6a5406361e59ae728a837b9a",
+      "bytes": 4898076,
+      "ext": "onnx"
+    },
+    "models/snap-encoder.onnx": {
+      "sha256": "ef3db30237d3d840727c298c7100b86c56dfec77a83aff6faa7712bfcee33b93",
+      "bytes": 4898076,
+      "ext": "onnx"
+    },
+    "models/member-fields.onnx": {
+      "sha256": "bc6ff2c7221d0ea197661dd6670fb12d3bd8d0e6811c00b8caa904a793b59264",
+      "bytes": 1356781,
+      "ext": "onnx"
+    },
+    "models/snap-fields.onnx": {
+      "sha256": "fa35b8a80688e3c1f92b3dbd6c567364b842a3a8f25387fac0879b7f740591b4",
+      "bytes": 1310681,
+      "ext": "onnx"
+    },
+    "models/member-rank.onnx": {
+      "sha256": "e8e8daa2a28def53b7d1baca281980db118fc9a3364cfde02f4bd8b3f8af68fc",
+      "bytes": 809753,
+      "ext": "onnx"
+    },
+    "models/snap-rank.onnx": {
+      "sha256": "38c5eb44cecc3380bcc2adf3c0f59049e904b5618593950b27c2d552412883f1",
+      "bytes": 809753,
+      "ext": "onnx"
+    }
+  },
+  "runtime": {
+    "glue": "runtime/ort.wasm.min.js",
+    "module": "runtime/ort-wasm-simd-threaded.mjs",
+    "wasm": "runtime/ort-wasm-simd-threaded.wasm"
+  },
+  "pipeline": {
+    "tiles": {
+      "member": [224, 294],
+      "snap": [326, 184]
+    },
+    "locator": {
+      "model": "models/locator.onnx",
+      "longEdge": 640,
+      "multiple": 32,
+      "pad": 128,
+      "classes": ["member", "snap"],
+      "stride": 8,
+      "threshold": 0.4,
+      "minVisible": 0.5,
+      "overlap": 0.5,
+      "maxPeaks": 300,
+      "maxDetections": 200
+    },
+    "encoders": {
+      "member": {
+        "model": "models/member-encoder.onnx",
+        "input": [160, 128],
+        "inset": 6,
+        "similarity": 0.88,
+        "margin": 0.15
+      },
+      "snap": {
+        "model": "models/snap-encoder.onnx",
+        "input": [128, 224],
+        "inset": 6,
+        "similarity": 0.81,
+        "margin": 0.16
+      }
+    },
+    "fields": {
+      "member": {
+        "model": "models/member-fields.onnx",
+        "input": [56, 144],
+        "classes": 106,
+        "left": -6,
+        "bottom": 56,
+        "width": 144,
+        "height": 56,
+        "edge": 2,
+        "confidence": 0.9994,
+        "margin": 0.5
+      },
+      "snap": {
+        "model": "models/snap-fields.onnx",
+        "input": [56, 144],
+        "classes": 101,
+        "left": -6,
+        "bottom": 56,
+        "width": 144,
+        "height": 56,
+        "edge": 2,
+        "confidence": 0.995,
+        "margin": 0.5
+      }
+    },
+    "ranks": {
+      "member": {
+        "model": "models/member-rank.onnx",
+        "input": [48, 48],
+        "classes": 6,
+        "center": [194.5, 267.2],
+        "size": 96,
+        "icon": [64, 59.6078431372549],
+        "edge": 2,
+        "confidence": 0.9998,
+        "margin": 0.5
+      },
+      "snap": {
+        "model": "models/snap-rank.onnx",
+        "input": [48, 48],
+        "classes": 6,
+        "center": [306.1, 153.8],
+        "size": 96,
+        "icon": [64, 59.6078431372549],
+        "edge": 2,
+        "confidence": 0.995,
+        "margin": 0.5
+      }
     }
   },
   "galleries": {
     "gallery": {
-      "builder": "sift-rootsift/1",
-      "requirements": ["opencv-python-headless==5.0.0.93", "numpy==2.4.3", "Pillow==12.1.1"]
+      "builder": "encoder-embed/1",
+      "requirements": ["onnxruntime==1.22.1", "numpy==2.4.3", "Pillow==12.1.1"]
     }
   }
 }
