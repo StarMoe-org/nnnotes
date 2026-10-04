@@ -246,6 +246,8 @@ def test_reencoding_changes_all_json_transport_and_preserves_wasm_js_and_every_d
     report = reencode.reencode(tmp_path / "encoding")
     assert report["encodedBytes"] < report["decodedBytes"]
     assert {"snap-labels.json", "deck-data.json", "manifest.json", "music-data.json", "build.json"} <= {Path(item["key"]).name for item in report["objects"]}
+    assert any(item["key"].endswith("/recommend/build.json") for item in report["objects"])
+    assert {Path(key).name for key in report["unchangedArtifacts"]} >= {"ournotes_recommend.js", "ournotes_recommend_bg.wasm"}
     for full, raw in before.items():
         if full.endswith(".json"):
             assert s3.headers[full]["ContentEncoding"] == "gzip"

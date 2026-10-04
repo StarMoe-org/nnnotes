@@ -28,8 +28,13 @@ published into the story site's bucket under `music-data/` (`https://storage.bdo
 | `music-data.json.br` | the current file brotli-compressed (quality 9) | `no-cache` |
 | `jackets/<jacket>.webp` | every song's jacket (`--jackets`), where the page looks for them | `public, max-age=86400` |
 | `archive/<master version>/<sha256>.json` | every published file, kept | `public, max-age=31536000, immutable` |
-| `build.json` | the build marker: the file's SHA-256, size and counts, what it was made from, the gate results, the run | `no-cache` |
-| `replay/<manifest SHA-256>/...` | the SHA-bound deck, 13 Snap label tables, charts and shared engine | versioned directory; never overwrites another manifest's resources |
+| `build.json` | the build marker: the file's SHA-256, size and counts, its `replay` pointer, what it was made from, the gate results, the run | `no-cache` |
+| `replay/<manifest SHA-256>/...` | the SHA-bound deck, 13 Snap label tables, charts, shared replay engine and recommendation engine | versioned directory; never overwrites another manifest's resources |
+
+`build.json`'s `replay` is the `replay` object of the `music-data.json` it names (`format`, `manifestUrl`, `sha256`,
+`charts`); `manifestUrl` is relative to the directory of both files. A reader that needs only the replay manifest
+(deck data, engines) reads the small marker instead of the whole file. The marker is written last, after the manifest
+and every resource it lists were uploaded and read back.
 
 All JSON is stored with deterministic gzip, `Content-Type: application/json` and `Content-Encoding: gzip` at its
 existing `.json` URL. Alongside it, `music-data.json.br` is compressed with Brotli (quality 9) and published
@@ -87,7 +92,12 @@ extend the existing linear plain-skill UI domain or derive source rank threshold
      `provenance.client`; nnnotes also reads the bundles the APK carries, as in the story site's builds), the decoded
      master data of moenotes-masterdata-sync (every file SHA-256 checked against `index.json`, `MasterManifest.json`
      included);
-   - `nnnotes music-data --decoded-master --jackets jackets -o music-data.json`: the master data as decoded (no
+   - the pinned ournotes-deck source (`MUSIC_DATA_DECK_SOURCE`, the commit `rust/Cargo.lock` pins, clean before and
+     after the builds): its CLI, then `wasm/replay` and `wasm/recommend`, each with its own lockfile, for
+     `wasm32-unknown-unknown` and through `wasm-bindgen --target web` (`ournotes_replay`, `ournotes_recommend`), each
+     package with a `build.json` of its commit and JS/WASM SHA-256;
+   - `nnnotes music-data --decoded-master --jackets jackets --replay-dir replay --replay-engine ... --recommend-engine
+     ... -o music-data.json`: the master data as decoded (no
      master key), `provenance.master` the manifest's version and SHA-256 of the files as served; the charts, cue
      sheets and jackets from the TW catalog, downloaded afresh on every run (never `actions/cache`: nnnotes keeps a
      downloaded catalog for good, and the cache holds decrypted game files);
@@ -138,6 +148,11 @@ Turn it on (`gh variable set MUSIC_DATA_PUBLISH --body true`) once the published
 nothing being published, `plan` finds no `build.json` and every run builds.
 
 ## Gates
+
+The `replay` gate checks the replay inventory: every resource's SHA-256 and size, the immutable directory, the chart
+IDs, the replay engine and, required for a new build, `manifest.recommendEngine`: its model commit is the replay
+engine's and the music data's, and its `build.json` (`ournotes.recommend-engine/1`, clean) names the JS and WASM
+SHA-256. The recommendation engine's files are uploaded and read back before the manifest like every other resource.
 
 The replay inventory also accepts `manifest.snapLabels` (`nnnotes.replay-labels/1`). Its SHA/size, region,
 master version and all 13 served-table hashes must match the checked music-data provenance. It is uploaded and

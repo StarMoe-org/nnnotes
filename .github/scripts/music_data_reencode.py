@@ -66,7 +66,9 @@ def reencode(out: Path, dry_run=False) -> dict:
     manifest = json.loads(manifest_path.read_bytes())
     require("snapLabels" in manifest, "all 13 same-source Snap label tables are required")
     engine = manifest["engine"]
-    for entry in [manifest["deckData"], manifest["snapLabels"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"]]:
+    recommend = [manifest["recommendEngine"][k] for k in ("js", "wasm", "build")] if "recommendEngine" in manifest else []
+    for entry in [manifest["deckData"], manifest["snapLabels"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"],
+                  *recommend]:
         path = target(root, manifest_path.parent, entry["url"])
         fetch(path.relative_to(root).as_posix(), entry["sha256"], entry["bytes"])
     runtime = md.replay_resources(root, doc)  # Includes labels/source hashes, chart IDs, model and JS/WASM build identity.

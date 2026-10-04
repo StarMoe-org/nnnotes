@@ -765,10 +765,12 @@ def rewrite_replay_manifest(out, doc, manifest):
     for file in ("check.json", "build.json"):
         info = json.loads((out / file).read_bytes())
         info.update(sha256=music_data.sha256(raw), bytes=len(raw))
+        if file == "build.json":
+            info["replay"] = doc["replay"]
         (out / file).write_text(json.dumps(info))
 
 
-def replay_out(out):
+def replay_out(out, recommend=True):
     """Small ABI resources: exercise publication identity/order without game assets."""
     doc = json.loads((out / music_data.FILE).read_bytes())
     commit = doc["provenance"]["deck"]["commit"]
@@ -787,6 +789,12 @@ def replay_out(out):
     manifest = {"format": "nnnotes.replay-manifest/1", "deckData": resource("deck-data.json", b"{}"),
                 "charts": charts, "engine": {"model": {"commit": commit}, "requestFormat": "ournotes.replay/1",
                                                   "js": js, "wasm": wasm, "build": built}}
+    if recommend:
+        js = resource("recommend/ournotes_recommend.js", b"export class RecommendationSession {}")
+        wasm = resource("recommend/ournotes_recommend_bg.wasm", b"\0asm\x01\0\0\0recommend")
+        built = resource("recommend/build.json", json.dumps({"format": "ournotes.recommend-engine/1", "commit": commit,
+                         "workingTreeDirty": False, "jsSha256": js["sha256"], "wasmSha256": wasm["sha256"]}).encode())
+        manifest["recommendEngine"] = {"model": {"commit": commit}, "js": js, "wasm": wasm, "build": built}
     raw_manifest = json.dumps(manifest).encode()
     resource("manifest.json", raw_manifest)
     doc["replay"] = {"format": manifest["format"], "manifestUrl": "replay/staging/manifest.json",
@@ -806,8 +814,59 @@ def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatc
     runtime = ["music-data/" + p.relative_to(out).as_posix() for p in paths]
     assert keys[-4:] == [runtime[-1], "music-data/music-data.json", "music-data/music-data.json.br", "music-data/build.json"]
     assert set(runtime[:-1]).issubset(keys[:-4])
+    assert {replay_key(doc, f"recommend/{name}") for name in ("ournotes_recommend.js", "ournotes_recommend_bg.wasm",
+                                                              "build.json")}.issubset(keys[:-4])
     types = {k: mime for k, _, mime in s3.log}
     assert types[replay_key(doc, "engine/ournotes_replay_bg.wasm")] == "application/wasm"
+    assert types[replay_key(doc, "recommend/ournotes_recommend_bg.wasm")] == "application/wasm"
+    assert types[replay_key(doc, "recommend/ournotes_recommend.js")] == "text/javascript"
+    marker = json.loads(music_data.http_compression.decode_content(s3.store["music-data/build.json"], "gzip"))
+    assert marker["replay"] == doc["replay"]
+
+
+def test_publish_stops_when_the_marker_names_another_replay_manifest(tmp_path, monkeypatch):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    replay_out(out)
+    marker = json.loads((out / music_data.MARKER).read_bytes())
+    marker["replay"] = dict(marker["replay"], manifestUrl="replay/" + "f" * 64 + "/manifest.json", sha256="f" * 64)
+    (out / music_data.MARKER).write_text(json.dumps(marker))
+    with pytest.raises(SystemExit, match="replay pointer is not the file's"):
+        music_data.cmd_publish(str(out))
+    assert not s3.log
+
+
+@pytest.mark.parametrize("recommend", [True, False])
+def test_check_writes_the_replay_pointer_into_the_marker(tmp_path, monkeypatch, recommend):
+    s3 = FakeS3()
+    out, _ = published_out(tmp_path, monkeypatch, s3)
+    doc, _ = replay_out(out, recommend=recommend)
+    (out / music_data.MARKER).unlink()
+    raw = (out / music_data.FILE).read_bytes()
+    master = tmp_path / "master"
+    master.mkdir(exist_ok=True)
+    snapshot = {"region": "hk-tw-mo", "entry": {"version": "v-test"}, "files": {music_data.MANIFEST: "ab" * 32}}
+    music_data.snapshot_file(master).write_text(json.dumps(snapshot), encoding="utf-8")
+    passed = {"passed": True, "sha256": music_data.sha256(raw), "bytes": len(raw), "gates": []}
+    monkeypatch.setattr(music_data, "gates", lambda raw, ctx: copy.deepcopy(passed))
+    monkeypatch.setattr(music_data, "published", lambda key: None)
+    monkeypatch.setattr(music_data, "deck_commit", lambda: DECK)
+    monkeypatch.setattr(music_data, "inputs", lambda entry, files=None: {"recipe": music_data.RECIPE})
+    monkeypatch.setenv("NNNOTES_CATALOG_REGION", "tw")
+    monkeypatch.setitem(sys.modules, "nnnotes", type(sys)("nnnotes"))
+    sys.modules["nnnotes"].__version__ = "0.1.2"
+    if not recommend:
+        with pytest.raises(SystemExit, match="a gate failed"):
+            music_data.cmd_check(str(out), str(master), str(tmp_path / "page"))
+        check = json.loads((out / "check.json").read_bytes())
+        assert gate(check, "replay")["failures"] == ["final replay manifest has no recommend engine"]
+        assert not (out / music_data.MARKER).exists()
+        return
+    music_data.cmd_check(str(out), str(master), str(tmp_path / "page"))
+    marker = json.loads((out / music_data.MARKER).read_bytes())
+    assert marker["replay"] == doc["replay"]
+    assert marker["replay"]["manifestUrl"] == f"replay/{marker['replay']['sha256']}/manifest.json"
+    assert (out / marker["replay"]["manifestUrl"]).is_file()
 
 
 @pytest.mark.parametrize("manifest_url", ["replay/manifest.json", "replay/" + "f" * 64 + "/manifest.json"])
@@ -880,7 +939,8 @@ def test_replay_labels_are_checked_and_uploaded_before_manifest(tmp_path, monkey
         assert keys.index(replay_key(doc, "snap-labels.json")) < keys.index(replay_key(doc, "manifest.json"))
 
 
-@pytest.mark.parametrize("changed", ["bytes", "model", "escape", "absolute", "ids", "abi", "dirty"])
+@pytest.mark.parametrize("changed", ["bytes", "model", "escape", "absolute", "ids", "abi", "dirty", "recommend-bytes",
+                                     "recommend-model", "recommend-dirty", "recommend-format"])
 def test_replay_identity_failure_prevents_any_upload(tmp_path, monkeypatch, changed):
     s3 = FakeS3()
     out, _ = published_out(tmp_path, monkeypatch, s3)
@@ -905,6 +965,20 @@ def test_replay_identity_failure_prevents_any_upload(tmp_path, monkeypatch, chan
             raw = json.dumps(data).encode()
             built.write_bytes(raw)
             manifest["engine"]["build"].update(sha256=music_data.sha256(raw), bytes=len(raw))
+        elif changed == "recommend-bytes":
+            replay_path(out, doc, "recommend/ournotes_recommend_bg.wasm").write_bytes(b"\0asm\x01\0\0\0other")
+        elif changed == "recommend-model":
+            manifest["recommendEngine"]["model"]["commit"] = "other"
+        elif changed in ("recommend-dirty", "recommend-format"):
+            built = replay_path(out, doc, "recommend/build.json")
+            data = json.loads(built.read_bytes())
+            if changed == "recommend-dirty":
+                data["workingTreeDirty"] = True
+            else:
+                data["format"] = "ournotes.replay-engine/1"
+            raw = json.dumps(data).encode()
+            built.write_bytes(raw)
+            manifest["recommendEngine"]["build"].update(sha256=music_data.sha256(raw), bytes=len(raw))
         rewrite_replay_manifest(out, doc, manifest)
     with pytest.raises(SystemExit, match="replay resources changed after gates"):
         music_data.cmd_publish(str(out))
@@ -984,20 +1058,30 @@ def test_engine_build_checks_pinned_source_before_and_after_compiling(tmp_path, 
     def run(cmd, **kw):
         builds.append(cmd)
         if cmd[0] == "wasm-bindgen":
-            engine = Path(cmd[cmd.index("--out-dir") + 1])
-            (engine / "ournotes_replay.js").write_bytes(b"js")
-            (engine / "ournotes_replay_bg.wasm").write_bytes(b"wasm")
+            engine, name = Path(cmd[cmd.index("--out-dir") + 1]), cmd[cmd.index("--out-name") + 1]
+            (engine / f"{name}.js").write_bytes(b"js " + name.encode())
+            (engine / f"{name}_bg.wasm").write_bytes(b"wasm " + name.encode())
     monkeypatch.setattr(music_data.subprocess, "check_output", output)
     monkeypatch.setattr(music_data.subprocess, "run", run)
     if change:
         with pytest.raises(SystemExit, match="source is dirty or differs"):
             music_data.build_replay_engine(out)
         assert not (out / "replay-engine-build/build.json").exists()
-        assert len(builds) == (3 if change == "changed-during-build" else 0)
+        assert not (out / "recommend-engine-build/build.json").exists()
+        assert len(builds) == (5 if change == "changed-during-build" else 0)
     else:
-        engine = music_data.build_replay_engine(out)
-        identity = json.loads((engine / "build.json").read_bytes())
-        assert identity["commit"] == pinned and identity["workingTreeDirty"] is False
-        assert identity["jsSha256"] == music_data.sha256(b"js")
-        assert identity["wasmSha256"] == music_data.sha256(b"wasm")
-        assert len(checks) == 2 and len(builds) == 3
+        replay, recommend = music_data.build_replay_engine(out)
+        assert all("wasm/replay" in cmd and "wasm/recommend" in cmd for cmd in checks)
+        assert [cmd[cmd.index("--manifest-path") + 1] for cmd in builds if cmd[0] == "cargo"][1:] == [
+            str(source / "wasm/replay/Cargo.toml"), str(source / "wasm/recommend/Cargo.toml")]
+        bindgen = [cmd for cmd in builds if cmd[0] == "wasm-bindgen"]
+        assert all(cmd[1:3] == ["--target", "web"] for cmd in bindgen)
+        assert [Path(cmd[-1]).name for cmd in bindgen] == ["ournotes_replay_wasm.wasm", "ournotes_recommend_wasm.wasm"]
+        for engine, name, build_format in ((replay, "ournotes_replay", "ournotes.replay-engine/1"),
+                                           (recommend, "ournotes_recommend", "ournotes.recommend-engine/1")):
+            identity = json.loads((engine / "build.json").read_bytes())
+            assert identity["format"] == build_format
+            assert identity["commit"] == pinned and identity["workingTreeDirty"] is False
+            assert identity["jsSha256"] == music_data.sha256(b"js " + name.encode())
+            assert identity["wasmSha256"] == music_data.sha256(b"wasm " + name.encode())
+        assert len(checks) == 2 and len(builds) == 5
