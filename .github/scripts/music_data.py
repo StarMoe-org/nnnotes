@@ -52,15 +52,18 @@ FORMAT = "nnnotes.music-data/1"
 BUILD_FORMAT = "moenotes.music-data-build/1"
 # This script's own version of a build: bump it when what it builds or publishes changes, so that the next run builds
 # although the master data, the deck model and nnnotes are the same.
-RECIPE = 5
+RECIPE = 6
 FILE, FILE_BR, MARKER, JACKETS, ARCHIVE = "music-data.json", "music-data.json.br", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
 SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
 SCHEMA = Path("docs/schema/music-data.schema.json")
 SMOKE = Path(__file__).resolve().parent / "music_data_smoke.mjs"
 ARCHIVE_CACHE = story_site.ASSET_CACHE              # archive/<version>/<sha256>.json: content-addressed
+RUNTIME_CACHE = story_site.ASSET_CACHE              # replay/<manifest sha256>/...: content-addressed
 FILE_CACHE = "no-cache"                             # music-data.json and build.json change in place
 JACKET_CACHE = "public, max-age=86400"
+# stored gzip-compressed (Content-Encoding: gzip) with these types; the hashes are of the decoded bytes
+GZIP_TYPES = {".json": "application/json", ".js": "text/javascript", ".wasm": "application/wasm"}
 SNAPSHOT_KEYS = ("version", "resource_version", "resource_hash", "client_version", "verified_at", "manifest_sha256", "table_count",
                  "server", "upstream", "assets")
 
@@ -84,6 +87,11 @@ SONG_TABLES = ("MasterLiveMusic", "MasterLiveMusicScore", "MasterText", "MasterB
 REPLAY_LABEL_TABLES = ("MasterSupportSkill", "MasterSupportSkillEffect", "MasterGekisouSupportSkill",
                        "MasterGekisouSupportSkillEffect", "MasterText", "MasterSkillConditionSet", "MasterSkillCondition",
                        "MasterSkillCumulativeCondition", "MasterSkillTarget", "MasterCharacter", "MasterMemberCard", "MasterSupportCard", "MasterBand")
+# the web WASM packages built from the pinned model source: its package directory, the crate's WASM file, the
+# wasm-bindgen --out-name, the build.json format and the build directory under the build step's OUT
+ENGINES = (("wasm/replay", "ournotes_replay_wasm", "ournotes_replay", "ournotes.replay-engine/1", "replay-engine-build"),
+           ("wasm/recommend", "ournotes_recommend_wasm", "ournotes_recommend", "ournotes.recommend-engine/1",
+            "recommend-engine-build"))
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 LISTED = 20                                         # failures and warnings listed per gate
@@ -327,14 +335,15 @@ def cmd_build(out: str) -> None:
     o.mkdir(parents=True, exist_ok=True)
     nnnotes = [sys.executable, "-m", "nnnotes"]
     usage = subprocess.run(nnnotes + ["music-data", "--help"], capture_output=True, text=True).stdout
-    if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine")):
-        fail("the installed nnnotes lacks decoded-master/replay export (sync the fork with upstream)")
-    engine = build_replay_engine(o)
+    if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine", "--recommend-engine")):
+        fail("the installed nnnotes lacks decoded-master/replay/recommend export (sync the fork with upstream)")
+    engine, recommend = build_replay_engine(o)
     if env("MASTERDATA_REGION") == "jp":
         import jp_vpngate
         jp_vpngate.start()
     cmd = nnnotes + ["music-data", "--decoded-master", "--jackets", str(o / "jackets"),
-                    "--replay-dir", str(o / "replay"), "--replay-engine", str(engine), "-o", str(o / FILE)]
+                    "--replay-dir", str(o / "replay"), "--replay-engine", str(engine),
+                    "--recommend-engine", str(recommend), "-o", str(o / FILE)]
     print("+ " + " ".join(cmd[1:]), flush=True)
     with open(o / "music-data.summary.json", "wb") as f:
         status = subprocess.run(cmd, stdout=f).returncode
@@ -348,32 +357,38 @@ def cmd_build(out: str) -> None:
             f"{short(r.get('deck'))}, {r.get('bytes')} bytes, sha256 {short(r.get('sha256'))}")
 
 
-def build_replay_engine(out: Path) -> Path:
-    """Build CLI and web WASM from the same pinned clean model source as nnnotes._deck."""
+def build_replay_engine(out: Path) -> tuple[Path, ...]:
+    """Build the CLI and the web WASM packages (ENGINES: replay, recommendation) from the same pinned clean model
+    source as nnnotes._deck; returns their directories, each with its build.json."""
     source = Path(env("MUSIC_DATA_DECK_SOURCE")).resolve()
     pinned = deck_commit()
     def check_source():
         head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         changed = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=all",
-                                            "--", "Cargo.toml", "Cargo.lock", "crates", "wasm/replay"], text=True).strip()
+                                            "--", "Cargo.toml", "Cargo.lock", "crates",
+                                            *(package for package, *_ in ENGINES)], text=True).strip()
         if head != pinned or changed:
             fail("replay model source is dirty or differs from nnnotes' pinned deck commit")
     check_source()
-    engine = out / "replay-engine-build"
-    engine.mkdir(parents=True, exist_ok=True)
     subprocess.run(["cargo", "build", "--manifest-path", str(source / "Cargo.toml"),
                     "--release", "--locked", "-j2", "--bin", "ournotes-deck"], check=True)
     target = out.parent / "replay-target"
-    subprocess.run(["cargo", "build", "--manifest-path", str(source / "wasm/replay/Cargo.toml"),
-                    "--target-dir", str(target), "--target", "wasm32-unknown-unknown", "--release", "--locked", "-j2"], check=True)
-    subprocess.run(["wasm-bindgen", "--target", "web", "--out-dir", str(engine), "--out-name", "ournotes_replay",
-                    str(target / "wasm32-unknown-unknown/release/ournotes_replay_wasm.wasm")], check=True)
+    engines = []
+    for package, crate, name, _, directory in ENGINES:
+        engine = out / directory
+        engine.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["cargo", "build", "--manifest-path", str(source / package / "Cargo.toml"), "--target-dir",
+                        str(target), "--target", "wasm32-unknown-unknown", "--release", "--locked", "-j2"], check=True)
+        subprocess.run(["wasm-bindgen", "--target", "web", "--out-dir", str(engine), "--out-name", name,
+                        str(target / f"wasm32-unknown-unknown/release/{crate}.wasm")], check=True)
+        engines.append(engine)
     check_source()
-    built = {"format": "ournotes.replay-engine/1", "commit": pinned, "workingTreeDirty": False,
-             "jsSha256": sha256((engine / "ournotes_replay.js").read_bytes()),
-             "wasmSha256": sha256((engine / "ournotes_replay_bg.wasm").read_bytes())}
-    (engine / "build.json").write_text(json.dumps(built, indent=2) + "\n", encoding="utf8")
-    return engine
+    for engine, (_, _, name, build_format, _) in zip(engines, ENGINES):
+        built = {"format": build_format, "commit": pinned, "workingTreeDirty": False,
+                 "jsSha256": sha256((engine / f"{name}.js").read_bytes()),
+                 "wasmSha256": sha256((engine / f"{name}_bg.wasm").read_bytes())}
+        (engine / "build.json").write_text(json.dumps(built, indent=2) + "\n", encoding="utf8")
+    return tuple(engines)
 
 
 def replay_resources(out: Path, doc: dict) -> list[Path]:
@@ -404,8 +419,14 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
         raise ValueError("replay engine request format differs from the shared ABI")
     if engine["model"]["commit"] != doc["provenance"]["deck"]["commit"]:
         raise ValueError("replay engine and music data name different model commits")
+    recommend = manifest.get("recommendEngine")
+    if "recommendEngine" in manifest and (not isinstance(recommend, dict) or not isinstance(recommend.get("model"), dict)
+                                          or recommend["model"].get("commit") != engine["model"]["commit"]):
+        raise ValueError("recommend engine and replay engine name different model commits")
     paths = []
     entries = [manifest["deckData"], *manifest["charts"], engine["js"], engine["wasm"], engine["build"]]
+    if recommend is not None:
+        entries += [recommend["js"], recommend["wasm"], recommend["build"]]
     if "snapLabels" in manifest:
         entries.append(manifest["snapLabels"])
     for entry in entries:
@@ -434,6 +455,12 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
             or built.get("workingTreeDirty") is True or built.get("jsSha256") != engine["js"]["sha256"]
             or built.get("wasmSha256") != engine["wasm"]["sha256"]):
         raise ValueError("replay engine build identity is inconsistent or dirty")
+    if recommend is not None:
+        built = json.loads(local(manifest_path.parent, recommend["build"]["url"]).read_bytes())
+        if (built.get("format") != "ournotes.recommend-engine/1" or built.get("commit") != recommend["model"]["commit"]
+                or built.get("workingTreeDirty") is not False or built.get("jsSha256") != recommend["js"]["sha256"]
+                or built.get("wasmSha256") != recommend["wasm"]["sha256"]):
+            raise ValueError("recommend engine build identity is inconsistent or dirty")
     return paths + [manifest_path]
 
 
@@ -1383,6 +1410,8 @@ def cmd_check(out: str, master: str, page: str) -> None:
         resources = replay_resources(o, json.loads(raw))
         if not resources:
             raise ValueError("final music data has no replay manifest")
+        if "recommendEngine" not in json.loads(resources[-1].read_bytes()):
+            raise ValueError("final replay manifest has no recommend engine")
         replay_gate["note"] = f"{len(resources)} SHA-bound runtime resources"
     except (OSError, ValueError, KeyError, TypeError) as error:
         replay_gate.update(passed=False,failures=[str(error)],failureCount=1)
@@ -1399,6 +1428,7 @@ def cmd_check(out: str, master: str, page: str) -> None:
         "format": BUILD_FORMAT,
         "file": FILE, "sha256": report["sha256"], "bytes": report["bytes"],
         "archive": f"{ARCHIVE}{version}/{report['sha256']}.json",
+        "replay": doc["replay"],
         "songs": len(doc["songs"]), "charts": sum(len(s["charts"]) for s in doc["songs"]),
         "jackets": len(list((o / "jackets").glob("*.webp"))),
         "inputs": inputs(snapshot["entry"], files=snapshot["files"]),
@@ -1416,11 +1446,10 @@ def cmd_check(out: str, master: str, page: str) -> None:
 
 # ---------------------------------------------------------------- publish
 def upload(b, key: str, src: Path, cache: str) -> None:
-    types = {".wasm":"application/wasm", ".js":"text/javascript"}
     if key.lower().endswith(".json.br") or src.name.lower().endswith(".json.br"):
         content_type = "application/json"
     else:
-        content_type = types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream"))
+        content_type = GZIP_TYPES.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream"))
     extra = {"ContentType": content_type, "CacheControl": cache}
     if key.lower().endswith(".json.br") or src.name.lower().endswith(".json.br"):
         if src.name.lower().endswith(".json.br"):
@@ -1434,8 +1463,8 @@ def upload(b, key: str, src: Path, cache: str) -> None:
         else:
             encoded, transport = http_compression.encode_brotli(src.read_bytes(), quality=9)
             b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
-    elif src.suffix.lower() == ".json":
-        encoded, transport = http_compression.encode_json(src.read_bytes())
+    elif src.suffix.lower() in GZIP_TYPES:
+        encoded, transport = http_compression.encode_gzip(src.read_bytes())
         b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
     else:
         b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
@@ -1443,27 +1472,29 @@ def upload(b, key: str, src: Path, cache: str) -> None:
 
 def read_back(b, key: str, digest: str) -> None:
     """Verify stored encoding/metadata and decoded SHA before advancing a public pointer."""
-    compressed_json = key.lower().endswith(".json") or key.lower().endswith(".json.br")
-    expected_encoding = "br" if key.lower().endswith(".json.br") else ("gzip" if compressed_json else None)
+    if key.lower().endswith(".json.br"):
+        expected_encoding, content_type = "br", "application/json"
+    else:
+        content_type = GZIP_TYPES.get(Path(key).suffix.lower())
+        expected_encoding = "gzip" if content_type else None
+    compressed = {"compressed": content_type is not None, "expected_encoding": expected_encoding,
+                  "content_type": content_type}
     try:
         # This is the consumer's actual response, with the same complete transport contract.
         # Some signed SDK responses fail this contract; retrying them need not delay a valid public response.
-        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
-                                       compressed_json=compressed_json, expected_encoding=expected_encoding)
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest, **compressed)
         return
     except (urllib.error.URLError, ValueError, OSError) as e:
         print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     for attempt in range(4):
         try:
-            http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest,
-                                           compressed_json=compressed_json, expected_encoding=expected_encoding)
+            http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest, **compressed)
             return
         except Exception as e:                       # Cloudflare in front of the store rejects a signed GET at times
             print(f"read back {key}: {type(e).__name__}", flush=True)
         time.sleep(3 * (attempt + 1))
     try:
-        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
-                                       compressed_json=compressed_json, expected_encoding=expected_encoding)
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest, **compressed)
         return
     except (urllib.error.URLError, ValueError, OSError) as e:
         print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
@@ -1490,10 +1521,13 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     if not report.get("passed") or report.get("sha256") != sha256(raw) or not (o / MARKER).is_file():
         fail("the file has not passed the gates (check.json): nothing is published")
     marker = json.loads((o / MARKER).read_text(encoding="utf-8"))
+    doc = json.loads(raw)
     try:
-        runtime = replay_resources(o, json.loads(raw))
+        runtime = replay_resources(o, doc)
     except (OSError, ValueError, KeyError, TypeError) as error:
         fail(f"replay resources changed after gates: {error}")
+    if marker.get("replay") != doc.get("replay"):
+        fail("the build marker's replay pointer is not the file's: nothing is published")
     require_current_source(marker)
     b = bucket()
     if not b.writable and not dry_run:
@@ -1502,7 +1536,7 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     jackets = sorted((o / "jackets").glob("*.webp"))
     try:
         have = {JACKETS + jacket.name: b.object_size(JACKETS + jacket.name) for jacket in jackets}
-        archived = b.object_size(marker["archive"]) == len(http_compression.encode_json(raw)[0])
+        archived = b.object_size(marker["archive"]) == len(http_compression.encode_gzip(raw)[0])
     except Exception as e:                           # a dry run without a key where the bucket lists to none
         if not dry_run:
             raise
@@ -1519,7 +1553,7 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     steps = [(JACKETS + j.name, j, JACKET_CACHE, False) for j in new]
     if not archived:
         steps.append((marker["archive"], o / FILE, ARCHIVE_CACHE, True))
-    steps += [(p.relative_to(o.resolve()).as_posix(), p, FILE_CACHE, True) for p in runtime]
+    steps += [(p.relative_to(o.resolve()).as_posix(), p, RUNTIME_CACHE, True) for p in runtime]
     # the file before the marker that names it, the jackets and the archive copy before the file
     steps += [
         (FILE, o / FILE, FILE_CACHE, True),

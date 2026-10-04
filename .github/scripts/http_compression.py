@@ -1,4 +1,4 @@
-"""HTTP JSON compression preserves the manifest's decoded-byte identity."""
+"""HTTP compression (JSON, JavaScript, WASM) preserves the manifest's decoded-byte identity."""
 from __future__ import annotations
 
 import gzip
@@ -14,7 +14,7 @@ def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def encode_json(raw: bytes) -> tuple[bytes, dict]:
+def encode_gzip(raw: bytes) -> tuple[bytes, dict]:
     encoded = gzip.compress(raw, compresslevel=6, mtime=0)
     return encoded, {"ContentEncoding": "gzip", "Metadata": {
         "decoded-sha256": digest(raw), "decoded-bytes": str(len(raw)),
@@ -58,25 +58,27 @@ def get_object(url: str, timeout: int = 300) -> dict:
             "Metadata": {key: response.headers.get("x-amz-meta-" + key) for key in METADATA_KEYS}}
 
 
-def verify_object(obj: dict, expected_sha256: str, *, compressed_json: bool, expected_encoding: str | None = None) -> dict:
-    """Check stored bytes, encoding and decoded manifest bytes independently."""
+def verify_object(obj: dict, expected_sha256: str, *, compressed: bool, expected_encoding: str | None = None,
+                  content_type: str | None = "application/json") -> dict:
+    """Check stored bytes, encoding and decoded manifest bytes independently; a compressed object declares
+    `content_type`."""
     raw = obj["Body"].read()
     encoding = obj.get("ContentEncoding")
-    if compressed_json:
+    if compressed:
         if expected_encoding is not None:
             if encoding != expected_encoding:
-                raise ValueError(f"JSON object does not declare Content-Encoding: {expected_encoding}")
+                raise ValueError(f"compressed object does not declare Content-Encoding: {expected_encoding}")
         elif encoding not in ("gzip", "br"):
-            raise ValueError("JSON object does not declare Content-Encoding: gzip or br")
-        if (obj.get("ContentType") or "").split(";", 1)[0] != "application/json":
-            raise ValueError("JSON object does not declare Content-Type: application/json")
-    if not compressed_json and encoding:
-        raise ValueError("non-JSON object has an unexpected content encoding")
+            raise ValueError("compressed object does not declare Content-Encoding: gzip or br")
+        if (obj.get("ContentType") or "").split(";", 1)[0] != content_type:
+            raise ValueError(f"compressed object does not declare Content-Type: {content_type}")
+    if not compressed and encoding:
+        raise ValueError("uncompressed object has an unexpected content encoding")
     decoded = decode_content(raw, encoding)
     if digest(decoded) != expected_sha256:
         raise ValueError("decoded object SHA-256 differs")
     facts = {"decoded-sha256": digest(decoded), "decoded-bytes": str(len(decoded)),
         "encoded-sha256": digest(raw), "encoded-bytes": str(len(raw))}
-    if compressed_json and any((obj.get("Metadata") or {}).get(key) != value for key, value in facts.items()):
+    if compressed and any((obj.get("Metadata") or {}).get(key) != value for key, value in facts.items()):
         raise ValueError("stored object metadata differs from encoded/decoded bytes")
     return facts
