@@ -820,6 +820,13 @@ def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatc
     assert types[replay_key(doc, "engine/ournotes_replay_bg.wasm")] == "application/wasm"
     assert types[replay_key(doc, "recommend/ournotes_recommend_bg.wasm")] == "application/wasm"
     assert types[replay_key(doc, "recommend/ournotes_recommend.js")] == "text/javascript"
+    caches = {k: c for k, c, _ in s3.log}
+    for path in paths:
+        key = "music-data/" + path.relative_to(out).as_posix()
+        assert caches[key] == "public, max-age=31536000, immutable"
+        assert s3.headers[key]["ContentEncoding"] == "gzip"
+        assert music_data.http_compression.decode_content(s3.store[key], "gzip") == path.read_bytes()
+    assert caches["music-data/music-data.json"] == caches["music-data/build.json"] == "no-cache"
     marker = json.loads(music_data.http_compression.decode_content(s3.store["music-data/build.json"], "gzip"))
     assert marker["replay"] == doc["replay"]
 

@@ -89,20 +89,20 @@ def reencode(out: Path, dry_run=False) -> dict:
         current(); md.read_back(bucket, probe_key, md.sha256(probe_raw))
         current()
         report["probe"] = {"key": probe_key, **http_compression.verify_object(
-            http_compression.get_object(md.public_url(probe_key)), md.sha256(probe_raw), compressed_json=True)}
+            http_compression.get_object(md.public_url(probe_key)), md.sha256(probe_raw), compressed=True)}
     def encode(path):
         key = path.relative_to(root).as_posix()
         raw = path.read_bytes()
-        _, transport = http_compression.encode_json(raw)
+        _, transport = http_compression.encode_gzip(raw)
         facts = {"key": key, **transport["Metadata"]}
         if bucket is not None:
             current()  # Re-encoding never overlaps another source/pointer revision.
-            md.upload(bucket, key, path, md.ARCHIVE_CACHE if key == marker["archive"] else md.FILE_CACHE)
+            md.upload(bucket, key, path, md.ARCHIVE_CACHE if key == marker["archive"] else md.RUNTIME_CACHE if key.startswith("replay/") else md.FILE_CACHE)
             current()
             md.read_back(bucket, key, md.sha256(raw))
             current()
             # Independently verify the externally served Content-Encoding, Content-Type and encoded/decoded identities.
-            verified = http_compression.verify_object(http_compression.get_object(md.public_url(key)), md.sha256(raw), compressed_json=True)
+            verified = http_compression.verify_object(http_compression.get_object(md.public_url(key)), md.sha256(raw), compressed=True)
             require(verified == transport["Metadata"], f"public transport differs from deterministic upload: {key}")
         return facts
     # JSON payloads can be verified in parallel; manifest, document and marker remain the final barriers.

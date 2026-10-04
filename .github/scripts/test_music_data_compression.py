@@ -22,11 +22,31 @@ def test_json_transport_keeps_the_manifest_hash_and_has_deterministic_stored_ide
     s3 = FakeS3(); bucket = FakeBucket(s3)
     md.upload(bucket, "replay/deck-data.json", path, "no-cache")
     obj = s3.get_object(Bucket=bucket.name, Key=bucket.prefix + "replay/deck-data.json")
-    facts = transport.verify_object(obj, md.sha256(raw), compressed_json=True)
+    facts = transport.verify_object(obj, md.sha256(raw), compressed=True)
     assert int(facts["encoded-bytes"]) < len(raw)
-    assert s3.store[bucket.prefix + "replay/deck-data.json"] == transport.encode_json(raw)[0]
+    assert s3.store[bucket.prefix + "replay/deck-data.json"] == transport.encode_gzip(raw)[0]
     assert gzip.decompress(s3.store[bucket.prefix + "replay/deck-data.json"]) == raw
     assert facts["decoded-sha256"] == md.sha256(raw)
+
+
+@pytest.mark.parametrize("name,content_type", [("engine_bg.wasm", "application/wasm"), ("engine.js", "text/javascript")])
+def test_engine_transport_is_gzip_with_its_type_and_decoded_identity(tmp_path, monkeypatch, name, content_type):
+    monkeypatch.setattr(md, "public_url", lambda key: "https://example.test/" + key)
+    monkeypatch.setattr(md.time, "sleep", lambda *a: None)
+    raw = b"\0asm\x01\0\0\0" + b"\x01" * 4000
+    path = tmp_path / name; path.write_bytes(raw)
+    s3 = FakeS3(); bucket = FakeBucket(s3)
+    key = "replay/" + "ab" * 32 + "/" + name
+    md.upload(bucket, key, path, md.RUNTIME_CACHE)
+    stored = s3.headers[bucket.prefix + key]
+    assert (stored["ContentEncoding"], stored["ContentType"]) == ("gzip", content_type)
+    assert stored["CacheControl"] == "public, max-age=31536000, immutable"
+    assert gzip.decompress(s3.store[bucket.prefix + key]) == raw and len(s3.store[bucket.prefix + key]) < len(raw)
+    monkeypatch.setattr(transport, "get_object", lambda *a, **kw: s3.get_object(Bucket=bucket.name, Key=bucket.prefix + key))
+    md.read_back(bucket, key, md.sha256(raw))
+    stored["ContentType"] = "application/octet-stream"
+    with pytest.raises(SystemExit, match="does not serve what was uploaded"):
+        md.read_back(bucket, key, md.sha256(raw))
 
 
 def test_complete_public_http_contract_avoids_unprovable_sdk_retries(tmp_path, monkeypatch):
@@ -86,7 +106,7 @@ def test_same_size_corrupt_archive_is_restored_and_verified_before_any_pointer(t
     md.cmd_publish(str(out))
     assert [key for key, _, _ in s3.log] == [archive, "music-data/music-data.json", "music-data/music-data.json.br", "music-data/build.json"]
     assert s3.store[archive] == previous
-    transport.verify_object(s3.get_object(Bucket="moenotes", Key=archive), report["sha256"], compressed_json=True)
+    transport.verify_object(s3.get_object(Bucket="moenotes", Key=archive), report["sha256"], compressed=True)
 
 
 def test_brotli_transport_encodes_and_decodes_cleanly():
@@ -99,13 +119,13 @@ def test_brotli_transport_encodes_and_decodes_cleanly():
     assert brotli.decompress(encoded) == raw
     assert transport.decode_content(encoded, "br") == raw
     obj = {"Body": io.BytesIO(encoded), "ContentType": "application/json", **transport_meta}
-    facts = transport.verify_object(obj, md.sha256(raw), compressed_json=True, expected_encoding="br")
+    facts = transport.verify_object(obj, md.sha256(raw), compressed=True, expected_encoding="br")
     assert facts["decoded-sha256"] == md.sha256(raw)
 
 
 @pytest.mark.parametrize("defect", ["missing-encoding", "wrong-type", "wrong-size", "wrong-stored-sha", "wrong-decoded-sha", "corrupt-body"])
 def test_wrong_encoding_or_either_identity_is_rejected(defect):
-    raw = b'{"test":true}'; body, extra = transport.encode_json(raw)
+    raw = b'{"test":true}'; body, extra = transport.encode_gzip(raw)
     obj = {"Body": io.BytesIO(body), "ContentType": "application/json", **extra}
     if defect == "missing-encoding": obj.pop("ContentEncoding")
     if defect == "wrong-type": obj["ContentType"] = "application/octet-stream"
@@ -114,7 +134,7 @@ def test_wrong_encoding_or_either_identity_is_rejected(defect):
     if defect == "wrong-decoded-sha": obj["Metadata"]["decoded-sha256"] = "a" * 64
     if defect == "corrupt-body": obj["Body"] = io.BytesIO(b"broken")
     with pytest.raises((ValueError, OSError)):
-        transport.verify_object(obj, md.sha256(raw), compressed_json=True)
+        transport.verify_object(obj, md.sha256(raw), compressed=True)
 
 
 def test_python_public_reads_decode_real_content_encoding(monkeypatch):

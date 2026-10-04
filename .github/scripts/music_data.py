@@ -59,8 +59,11 @@ SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit 
 SCHEMA = Path("docs/schema/music-data.schema.json")
 SMOKE = Path(__file__).resolve().parent / "music_data_smoke.mjs"
 ARCHIVE_CACHE = story_site.ASSET_CACHE              # archive/<version>/<sha256>.json: content-addressed
+RUNTIME_CACHE = story_site.ASSET_CACHE              # replay/<manifest sha256>/...: content-addressed
 FILE_CACHE = "no-cache"                             # music-data.json and build.json change in place
 JACKET_CACHE = "public, max-age=86400"
+# stored gzip-compressed (Content-Encoding: gzip) with these types; the hashes are of the decoded bytes
+GZIP_TYPES = {".json": "application/json", ".js": "text/javascript", ".wasm": "application/wasm"}
 SNAPSHOT_KEYS = ("version", "resource_version", "resource_hash", "client_version", "verified_at", "manifest_sha256", "table_count",
                  "server", "upstream", "assets")
 
@@ -1443,11 +1446,10 @@ def cmd_check(out: str, master: str, page: str) -> None:
 
 # ---------------------------------------------------------------- publish
 def upload(b, key: str, src: Path, cache: str) -> None:
-    types = {".wasm":"application/wasm", ".js":"text/javascript"}
     if key.lower().endswith(".json.br") or src.name.lower().endswith(".json.br"):
         content_type = "application/json"
     else:
-        content_type = types.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream"))
+        content_type = GZIP_TYPES.get(src.suffix.lower(), story_site.TYPES.get(src.suffix.lower(), "application/octet-stream"))
     extra = {"ContentType": content_type, "CacheControl": cache}
     if key.lower().endswith(".json.br") or src.name.lower().endswith(".json.br"):
         if src.name.lower().endswith(".json.br"):
@@ -1461,8 +1463,8 @@ def upload(b, key: str, src: Path, cache: str) -> None:
         else:
             encoded, transport = http_compression.encode_brotli(src.read_bytes(), quality=9)
             b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
-    elif src.suffix.lower() == ".json":
-        encoded, transport = http_compression.encode_json(src.read_bytes())
+    elif src.suffix.lower() in GZIP_TYPES:
+        encoded, transport = http_compression.encode_gzip(src.read_bytes())
         b.s3.upload_fileobj(io.BytesIO(encoded), b.name, b.prefix + key, ExtraArgs={**extra, **transport})
     else:
         b.s3.upload_file(str(src), b.name, b.prefix + key, ExtraArgs=extra)
@@ -1470,27 +1472,29 @@ def upload(b, key: str, src: Path, cache: str) -> None:
 
 def read_back(b, key: str, digest: str) -> None:
     """Verify stored encoding/metadata and decoded SHA before advancing a public pointer."""
-    compressed_json = key.lower().endswith(".json") or key.lower().endswith(".json.br")
-    expected_encoding = "br" if key.lower().endswith(".json.br") else ("gzip" if compressed_json else None)
+    if key.lower().endswith(".json.br"):
+        expected_encoding, content_type = "br", "application/json"
+    else:
+        content_type = GZIP_TYPES.get(Path(key).suffix.lower())
+        expected_encoding = "gzip" if content_type else None
+    compressed = {"compressed": content_type is not None, "expected_encoding": expected_encoding,
+                  "content_type": content_type}
     try:
         # This is the consumer's actual response, with the same complete transport contract.
         # Some signed SDK responses fail this contract; retrying them need not delay a valid public response.
-        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
-                                       compressed_json=compressed_json, expected_encoding=expected_encoding)
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest, **compressed)
         return
     except (urllib.error.URLError, ValueError, OSError) as e:
         print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
     for attempt in range(4):
         try:
-            http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest,
-                                           compressed_json=compressed_json, expected_encoding=expected_encoding)
+            http_compression.verify_object(b.s3.get_object(Bucket=b.name, Key=b.prefix + key), digest, **compressed)
             return
         except Exception as e:                       # Cloudflare in front of the store rejects a signed GET at times
             print(f"read back {key}: {type(e).__name__}", flush=True)
         time.sleep(3 * (attempt + 1))
     try:
-        http_compression.verify_object(http_compression.get_object(public_url(key)), digest,
-                                       compressed_json=compressed_json, expected_encoding=expected_encoding)
+        http_compression.verify_object(http_compression.get_object(public_url(key)), digest, **compressed)
         return
     except (urllib.error.URLError, ValueError, OSError) as e:
         print(f"read back {key} over HTTP: {type(e).__name__}", flush=True)
@@ -1532,7 +1536,7 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     jackets = sorted((o / "jackets").glob("*.webp"))
     try:
         have = {JACKETS + jacket.name: b.object_size(JACKETS + jacket.name) for jacket in jackets}
-        archived = b.object_size(marker["archive"]) == len(http_compression.encode_json(raw)[0])
+        archived = b.object_size(marker["archive"]) == len(http_compression.encode_gzip(raw)[0])
     except Exception as e:                           # a dry run without a key where the bucket lists to none
         if not dry_run:
             raise
@@ -1549,7 +1553,7 @@ def cmd_publish(out: str, dry_run: bool = False) -> None:
     steps = [(JACKETS + j.name, j, JACKET_CACHE, False) for j in new]
     if not archived:
         steps.append((marker["archive"], o / FILE, ARCHIVE_CACHE, True))
-    steps += [(p.relative_to(o.resolve()).as_posix(), p, FILE_CACHE, True) for p in runtime]
+    steps += [(p.relative_to(o.resolve()).as_posix(), p, RUNTIME_CACHE, True) for p in runtime]
     # the file before the marker that names it, the jackets and the archive copy before the file
     steps += [
         (FILE, o / FILE, FILE_CACHE, True),
