@@ -1,12 +1,13 @@
 name: Recognition gallery
 
-# Keeps the screenshot recognition gallery of MoeNotes' card box current. A run takes the union of the Member and Snap
+# Keeps the screenshot recognition bundle of MoeNotes' card box current. A run takes the union of the Member and Snap
 # cards of every enabled region's master data (moenotes-masterdata-sync), each card's artwork from the asset service
-# (SHA-256 and size checked) and the pinned runtime (OpenCV, ONNX Runtime and the field model, recognition-runtime.json),
-# computes the gallery's SIFT features and publishes everything content-addressed into the story site's bucket
-# (assets/<sha256>.<ext>): dependencies first, then the gallery and field manifests, then the bundle manifest that lists
-# them all, and last the small pointer recognition/current.json that names the bundle. Nothing is deleted or overwritten;
-# a catalog that lacks a published card, or any artwork that fails its check, leaves the pointer where it is.
+# (SHA-256 and size checked) and the pinned runtime and models (ONNX Runtime Web, the card locator, the Member and Snap
+# encoders, field and rank readers, recognition-runtime.json), computes each card's reference embedding with the pinned
+# encoder (ONNX Runtime on the CPU) and publishes everything content-addressed into the story site's bucket
+# (assets/<sha256>.<ext>): dependencies first, then the gallery and model manifests, then the bundle manifest that lists
+# them all, and last the small pointer recognition/current.json that names the bundle. Nothing is deleted or
+# overwritten; a catalog that lacks a published card, or any artwork that fails its check, leaves the pointer where it is.
 #
 # Triggers: moenotes-masterdata-sync's repository_dispatch `masterdata-updated`, a daily schedule in case a dispatch was
 # missed, and workflow_dispatch (force: build although the inputs are unchanged; dry_run). Publishing switch: the
@@ -67,9 +68,10 @@ jobs:
         run: python .github/scripts/recognition.py plan
 
   runtime:
-    # Only while a pinned runtime file is missing from the bucket (the first run, or after a pin changes).
+    # Uploads the pinned files the bucket lacks (the first run, or after a pin changes) and hands the encoder models to
+    # the build job; runs whenever a build follows or a pinned file is missing.
     needs: plan
-    if: needs.plan.outputs.runtime == 'true'
+    if: needs.plan.outputs.build == 'true' || needs.plan.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -83,14 +85,22 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: S3 SDK
         run: python -m pip install --quiet boto3
-      - name: Pinned runtime files from the release
+      - name: Pinned files from the release, encoder models for the build
         env:
           GH_TOKEN: ${{ github.token }}
           STORY_S3_ACCESS_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_ACCESS_KEY || '' }}
           STORY_S3_SECRET_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_SECRET_KEY || '' }}
         run: >-
           python .github/scripts/recognition.py runtime --work "$WORK/runtime" --report "$WORK/reports/runtime.json"
-          ${{ env.RECOGNITION_WRITE != 'true' && '--dry-run' || '' }}
+          --stage "$WORK/models" ${{ env.RECOGNITION_WRITE != 'true' && '--dry-run' || '' }}
+      - name: Encoder models for the build job
+        if: needs.plan.outputs.build == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: recognition-encoder-models
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ env.WORK }}/models/
       - name: Preserve the report (public identities only)
         if: always()
         uses: actions/upload-artifact@v7
@@ -101,7 +111,7 @@ jobs:
 
   build:
     needs: [plan, runtime]
-    if: always() && needs.plan.result == 'success' && needs.plan.outputs.build == 'true' && (needs.runtime.result == 'success' || needs.runtime.result == 'skipped')
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.build == 'true' && needs.runtime.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -109,20 +119,25 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Pinned feature extraction libraries
+      - name: Pinned gallery builder libraries
         run: |
           python -m pip install --quiet --only-binary=:all: boto3 pytest $(python .github/scripts/recognition.py requirements)
       - name: Self-test
         run: python -m pytest -q -p no:cacheprovider .github/scripts/test_recognition.py
+      - name: Encoder models from the runtime job
+        uses: actions/download-artifact@v8
+        with:
+          name: recognition-encoder-models
+          path: ${{ env.WORK }}/models
       - name: Build
-        run: python .github/scripts/recognition.py build "$WORK/out"
+        run: python .github/scripts/recognition.py build "$WORK/out" --models "$WORK/models"
       - name: Publish
         # Read-only preflight first; a dry run (the dry_run input, or RECOGNITION_PUBLISH off) stops after it.
         env:
           STORY_S3_ACCESS_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_ACCESS_KEY || '' }}
           STORY_S3_SECRET_KEY: ${{ env.RECOGNITION_WRITE == 'true' && secrets.STORY_S3_SECRET_KEY || '' }}
         run: python .github/scripts/recognition.py publish "$WORK/out" ${{ env.RECOGNITION_WRITE != 'true' && '--dry-run' || '' }}
-      - name: Preserve the reports (public identities only, no artwork or features)
+      - name: Preserve the reports (public identities only, no artwork or embeddings)
         if: always()
         uses: actions/upload-artifact@v7
         with:

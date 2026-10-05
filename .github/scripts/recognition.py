@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The screenshot recognition gallery (.github/workflows/recognition.yml, .github/RECOGNITION.md).
+"""The screenshot recognition bundle (.github/workflows/recognition.yml, .github/RECOGNITION.md).
 
 MoeNotes' card box recognizes Member and Snap cards in screenshots in the browser. Everything its Worker loads lives
 in the story site's bucket, content-addressed (`assets/<sha256>.<ext>`); one small mutable pointer,
@@ -8,16 +8,19 @@ in the story site's bucket, content-addressed (`assets/<sha256>.<ext>`); one sma
     plan                  the card catalog (every enabled region's master data) and its artwork against the published
                           bundle: GitHub outputs `build` (true: the catalog, artwork, runtime pins or recipe changed, or
                           $FORCE) and `runtime` (true: a pinned runtime file is not in the bucket yet)
-    runtime [--dry-run]   the pinned runtime files the bucket lacks, downloaded from this repository's draft release
-                          (`release` of recognition-runtime.json, `gh api`), checked and uploaded
-    build OUT [--runtime-dir DIR]
-                          the gallery: artwork from the asset service (SHA-256 and size checked), card images, SIFT
-                          features, the gallery, field and bundle manifests and the new pointer, as the bucket lays
-                          them out, under OUT/site; DIR adds the pinned runtime files for a local preview
+    runtime --stage DIR [--dry-run]
+                          the pinned files the bucket lacks, downloaded from this repository's draft release (`release`
+                          of recognition-runtime.json, `gh api`), checked and uploaded; the encoder models the gallery
+                          builder runs are written to DIR (from the bucket, or the release while they are missing)
+    build OUT --models DIR [--runtime-dir DIR]
+                          the bundle: artwork from the asset service (SHA-256 and size checked), each card's reference
+                          embedding (the pinned encoder models in --models, ONNX Runtime on the CPU), the gallery, model
+                          and bundle manifests and the new pointer, as the bucket lays them out, under OUT/site;
+                          --runtime-dir adds every pinned file for a local preview
     publish OUT [--dry-run]
                           every object of the bundle the bucket lacks (dependencies, then manifests, then the bundle
                           manifest), each read back over public HTTP, then the pointer; never deletes or overwrites
-    requirements          the pinned feature extraction libraries (for pip)
+    requirements          the pinned gallery builder libraries (for pip)
 
 Bucket: $STORY_S3_ENDPOINT, $STORY_S3_BUCKET, $RECOGNITION_S3_PREFIX (a key prefix, may be empty), credentials
 $STORY_S3_ACCESS_KEY / $STORY_S3_SECRET_KEY (publish and runtime only). Sources: $MASTERDATA_BASE_URL (decoded master
@@ -48,32 +51,36 @@ from http_compression import decode_content  # noqa: E402
 from story_site import env, output, summary  # noqa: E402
 
 RUNTIME_SPEC = HERE.parent / "recognition-runtime.json"
-RECIPE = "moenotes.recognition-gallery/1"
+SPEC_FORMAT = "moenotes.recognition-runtime/2"
+RECIPE = "moenotes.recognition-gallery/2"
+BUNDLE_FORMAT = "moenotes.recognition-bundle/2"
+GALLERY_FORMAT = "moenotes.embedding-gallery/1"
+MODELS_FORMAT = "moenotes.recognition-models/1"
+# Bundles any recipe published; the newest names the cards every later gallery keeps.
+PUBLISHED_FORMATS = ("moenotes.recognition-bundle/1", BUNDLE_FORMAT)
 POINTER = "recognition/current.json"
 ASSET_CACHE = "public, max-age=31536000, immutable"      # content-addressed: never changes
 POINTER_CACHE = "no-cache"
 ORIGIN = "https://bdon.moe"                              # read-back checks CORS as the site's Worker sees it
 USER_AGENT = "moenotes-recognition (GitHub Actions)"
-SOURCE = "https://github.com/empty-sekai/ournotes-boxlens/tree/v0.1.0"
 TYPES = {"json": "application/json", "js": "text/javascript; charset=utf-8", "mjs": "text/javascript; charset=utf-8",
          "wasm": "application/wasm", "onnx": "application/octet-stream", "bin": "application/octet-stream",
          "webp": "image/webp", "png": "image/png"}
 # The asset service publishes each server's files under /{region}/{language}/.
 ASSET_REGIONS = {"hk-tw-mo": "tw/zh-Hans", "en": "en/en", "kr": "kr/ko", "jp": "jp/ja"}
-KINDS = {"member": {"table": "MasterMemberCard", "directory": "MemberCard", "label": "member_thumbnail", "file": "square.webp"},
-         "snap": {"table": "MasterSupportCard", "directory": "SupportCard", "label": "snap_thumbnail", "file": "snap_thumbnail.webp"}}
-MEMBER_SIZE = (212, 282)                                 # the card list's portrait mask
-SIFT = {"nfeatures": 260, "contrastThreshold": 0.018, "edgeThreshold": 12, "maxWidth": 220}
-OPENCV_FILES = {"glue": "opencv/opencv.js", "wasm": "opencv/opencv_js.wasm"}
-FIELD_FILES = {"glue": "fields/ort.wasm.min.js", "module": "fields/ort-wasm-simd-threaded.mjs",
-               "wasm": "fields/ort-wasm-simd-threaded.wasm"}
-FIELD_MODEL = "fields/fields.onnx"
-GALLERY_BUFFERS = {"descriptors": "gallery/descriptors.f32.bin", "points": "gallery/points.f32.bin",
-                   "owners": "gallery/owners.i32.bin"}
-FIELD_SCOPE = ("BoxLens NumberReader field crops and decision rules on ONNX Runtime Web (WASM); low-confidence, "
-               "ambiguous, hidden or cropped fields are reported as unknown.")
+KINDS = {"member": {"table": "MasterMemberCard", "directory": "MemberCard", "label": "member_thumbnail", "file": "square.webp",
+                    "levels": "MasterMemberCardLevel", "limits": "MasterMemberCardLevelLimit"},
+         "snap": {"table": "MasterSupportCard", "directory": "SupportCard", "label": "snap_thumbnail", "file": "snap_thumbnail.webp",
+                  "levels": "MasterSupportCardLevel", "limits": "MasterSupportCardRank"}}
+GROWTH_TABLES = tuple(info[key] for info in KINDS.values() for key in ("levels", "limits"))
+RUNTIME_ROLES = ("glue", "module", "wasm")
+STAGES = ("encoders", "fields", "ranks")
 HEX64 = re.compile(r"[a-f0-9]{64}")
 ASSET_PATH = re.compile(r"assets/([a-f0-9]{64})\.([a-z0-9]+)")
+SCOPE = ("Gallery of reference embeddings for {member} Member and {snap} Snap cards: a card is identified when the cosine "
+         "similarity of its artwork window to the nearest same-kind reference reaches the encoder's `similarity` and "
+         "exceeds the second nearest by `margin`; otherwise it stays unknown. IDs are exact decimal strings. Files are "
+         "relative to this manifest.")
 
 
 class Failure(Exception):
@@ -164,8 +171,9 @@ def media_type(value: str | None) -> str:
     return (value or "").split(";", 1)[0].strip().lower()
 
 
-def verify_public(record: dict, *, missing_ok: bool = False) -> dict | None:
-    """The object as the browser gets it: exact bytes, Content-Type, no transfer encoding, CORS."""
+def verify_public(record: dict, *, missing_ok: bool = False, keep: dict | None = None) -> dict | None:
+    """The object as the browser gets it: exact bytes, Content-Type, no transfer encoding, CORS. `keep` receives the
+    checked bytes under the record's path."""
     response = fetch(site_base() + record["path"], origin=True, missing_ok=missing_ok, decode=False)
     if response is None:
         return None
@@ -180,6 +188,8 @@ def verify_public(record: dict, *, missing_ok: bool = False) -> dict | None:
     if response.headers.get("access-control-allow-origin") not in ("*", ORIGIN):
         problems.append("no Access-Control-Allow-Origin")
     require(not problems, f"{record['path']}: {', '.join(problems)}")
+    if keep is not None:
+        keep[record["path"]] = response.body
     return {"contentType": response.headers.get("content-type"), "cacheControl": response.headers.get("cache-control"),
             "accessControlAllowOrigin": response.headers.get("access-control-allow-origin")}
 
@@ -198,16 +208,84 @@ def object_present(record: dict) -> bool:
 
 
 # ---------------------------------------------------------------- runtime pins
+def number(value, what: str, low: float | None = None, high: float | None = None, integer: bool = False):
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    ok = ok and (not integer or isinstance(value, int)) and (low is None or value >= low) and (high is None or value <= high)
+    require(ok, f"recognition-runtime.json: {what} is invalid")
+    return value
+
+
+def pair(value, what: str, low: float | None = None, integer: bool = False) -> list:
+    require(isinstance(value, list) and len(value) == 2, f"recognition-runtime.json: {what} is invalid")
+    return [number(item, what, low, integer=integer) for item in value]
+
+
+def check_pipeline(spec: dict) -> set[str]:
+    """The model stages and their parameters; returns the pinned files they name."""
+    files, used = spec["files"], []
+
+    def model(stage: dict, what: str) -> None:
+        name = stage.get("model")
+        require(name in files and files[name]["ext"] == "onnx", f"recognition-runtime.json: {what} model is not a pinned .onnx file")
+        used.append(name)
+
+    runtime = spec.get("runtime")
+    require(isinstance(runtime, dict) and set(runtime) == set(RUNTIME_ROLES) and all(runtime[r] in files for r in RUNTIME_ROLES),
+            "recognition-runtime.json: runtime names its glue, module and wasm files")
+    used.extend(runtime.values())
+    pipeline = spec.get("pipeline")
+    require(isinstance(pipeline, dict) and set(pipeline) == {"tiles", "locator", *STAGES},
+            "recognition-runtime.json: pipeline has tiles, locator, encoders, fields and ranks")
+    require(isinstance(pipeline["tiles"], dict) and set(pipeline["tiles"]) == set(KINDS), "recognition-runtime.json: tiles per kind")
+    for kind, size in pipeline["tiles"].items():
+        pair(size, f"tiles.{kind}", 1)
+    locator = pipeline["locator"]
+    model(locator, "locator")
+    require(locator.get("classes") == list(KINDS), "recognition-runtime.json: locator classes are the card kinds in order")
+    for key in ("longEdge", "multiple", "stride", "maxPeaks", "maxDetections"):
+        number(locator.get(key), f"locator.{key}", 1, integer=True)
+    number(locator.get("pad"), "locator.pad", 0, 255, integer=True)
+    for key in ("threshold", "overlap", "minVisible"):
+        number(locator.get(key), f"locator.{key}", 0, 1)
+    for stage in STAGES:
+        require(isinstance(pipeline[stage], dict) and set(pipeline[stage]) == set(KINDS), f"recognition-runtime.json: {stage} per kind")
+        for kind, item in pipeline[stage].items():
+            what = f"{stage}.{kind}"
+            model(item, what)
+            pair(item.get("input"), f"{what}.input", 1, integer=True)
+            if stage == "encoders":
+                number(item.get("inset"), f"{what}.inset", 0)
+                number(item.get("similarity"), f"{what}.similarity", -1, 1)
+                number(item.get("margin"), f"{what}.margin", 0, 2)
+                continue
+            number(item.get("classes"), f"{what}.classes", 2, integer=True)
+            number(item.get("edge"), f"{what}.edge", 0)
+            number(item.get("confidence"), f"{what}.confidence", 0, 1)
+            number(item.get("margin"), f"{what}.margin", 0, 1)
+            if stage == "fields":
+                for key in ("left", "bottom", "width", "height"):
+                    number(item.get(key), f"{what}.{key}")
+            else:
+                pair(item.get("center"), f"{what}.center")
+                number(item.get("size"), f"{what}.size", 1)
+                pair(item.get("icon"), f"{what}.icon", 1)
+    require(len(used) == len(set(used)) and set(used) == set(files),
+            "recognition-runtime.json: every pinned file is used by exactly one runtime role or model")
+    return set(used)
+
+
 def runtime_spec(path: Path | None = None) -> dict:
     spec = json.loads((path or RUNTIME_SPEC).read_text(encoding="utf-8"))
-    require(spec.get("format") == "moenotes.recognition-runtime/1", "recognition-runtime.json: unknown format")
+    require(spec.get("format") == SPEC_FORMAT, "recognition-runtime.json: unknown format")
     require(isinstance(spec.get("release"), str) and re.fullmatch(r"[A-Za-z0-9._-]+", spec["release"]),
             "recognition-runtime.json: invalid release tag")
-    names = set(OPENCV_FILES.values()) | set(FIELD_FILES.values()) | {FIELD_MODEL}
-    require(set(spec.get("files", {})) == names, "recognition-runtime.json: runtime file names differ")
+    require(isinstance(spec.get("source"), str) and spec["source"].startswith("https://"), "recognition-runtime.json: source")
+    require(isinstance(spec.get("files"), dict) and spec["files"], "recognition-runtime.json: no files")
     for name, record in spec["files"].items():
-        require(HEX64.fullmatch(record.get("sha256", "")) and isinstance(record.get("bytes"), int) and record["bytes"] > 0
-                and record.get("ext") in TYPES, f"recognition-runtime.json: invalid record {name}")
+        require(re.fullmatch(r"[a-z]+/[A-Za-z0-9._-]+", name) and HEX64.fullmatch(record.get("sha256", ""))
+                and isinstance(record.get("bytes"), int) and record["bytes"] > 0 and record.get("ext") in TYPES
+                and name.endswith("." + record["ext"]), f"recognition-runtime.json: invalid record {name}")
+    check_pipeline(spec)
     for name, gallery in spec.get("galleries", {}).items():
         require(re.fullmatch(r"[a-z][a-z0-9-]*", name) and gallery.get("builder") in BUILDERS,
                 f"recognition-runtime.json: unknown gallery builder {gallery.get('builder')!r} for {name!r}")
@@ -221,12 +299,17 @@ def runtime_records(spec: dict) -> dict:
             for name, record in spec["files"].items()}
 
 
+def builder_inputs(spec: dict) -> list[str]:
+    """The pinned files the gallery builder runs: the encoder model of each kind."""
+    return [spec["pipeline"]["encoders"][kind]["model"] for kind in KINDS]
+
+
 def requirements(spec: dict) -> list[str]:
     return [item for gallery in spec["galleries"].values() for item in gallery.get("requirements", [])]
 
 
 def check_requirements(spec: dict) -> None:
-    """Features depend on the library versions: build only with the pinned ones."""
+    """Embeddings depend on the library versions: build only with the pinned ones."""
     from importlib.metadata import PackageNotFoundError, version
     for item in requirements(spec):
         name, _, wanted = item.partition("==")
@@ -235,6 +318,17 @@ def check_requirements(spec: dict) -> None:
         except PackageNotFoundError:
             installed = None
         require(installed == wanted, f"{name} {installed or 'missing'}; the gallery recipe pins {wanted}")
+
+
+def pinned_file(directory: Path, name: str, record: dict) -> Path:
+    """The file in `directory` (any depth, named after the pin or `<sha256>.<ext>`) whose bytes match the pin."""
+    wanted = {name.rsplit("/", 1)[1], f"{record['sha256']}.{record['ext']}"}
+    for path in sorted(directory.rglob("*")):
+        if path.is_file() and path.name in wanted:
+            raw = path.read_bytes()
+            if len(raw) == record["bytes"] and digest(raw) == record["sha256"]:
+                return path
+    raise Failure(f"{directory} has no file matching the pin of {name}")
 
 
 # ---------------------------------------------------------------- the card catalog
@@ -261,8 +355,46 @@ def identity(kind: str, row: dict) -> dict:
             "rarity": row["_rarity"], "cardType": row["_cardType"]}
 
 
+def integer_field(row: dict, field: str, what: str) -> int:
+    value = row.get(field)
+    require(isinstance(value, int) and not isinstance(value, bool), f"{what}: {field}")
+    return value
+
+
+def level_limit(kind: str, row: dict, growth: dict) -> int:
+    """The highest level the card reaches: its level curve, capped by the highest training (Member, by rarity) or
+    limit-break (Snap, by rank group) level limit."""
+    what = f"{kind} {row.get('_id')}"
+    group = integer_field(row, "_memberCardLevelGroup" if kind == "member" else "_supportCardLevelGroup", what)
+    curve = max((integer_field(r, "_level", what) for r in growth[KINDS[kind]["levels"]]
+                 if integer_field(r, "_group", what) == group), default=0)
+    require(curve >= 1, f"{what}: no level curve")
+    if kind == "member":
+        rarity = row["_rarity"]
+        limits = [integer_field(r, "_limitLevel", what) for r in growth[KINDS[kind]["limits"]] if r.get("_rarity") == rarity]
+    else:
+        rank_group = integer_field(row, "_supportCardRankGroup", what)
+        limits = [integer_field(r, "_limitLevel", what) for r in growth[KINDS[kind]["limits"]] if r.get("_group") == rank_group]
+    return min(max(limits), curve) if limits else curve
+
+
+def master_table(base: str, region: str, entry: dict, table: str) -> tuple[bytes, list]:
+    name = table + ".json"
+    expected = (entry.get("files") or {}).get(name)
+    require(isinstance(expected, str) and HEX64.fullmatch(expected), f"{region}: index.json lists no {name}")
+    for _ in range(3):
+        raw = fetch(base + entry["path"] + name).body
+        if digest(raw) == expected:
+            break
+    else:
+        raise Failure(f"{region} {name}: SHA-256 differs from index.json (the service changed snapshots? run again)")
+    data = json.loads(raw)
+    require(isinstance(data.get("_allData"), list), f"{region} {name}: no _allData")
+    return raw, data["_allData"]
+
+
 def master_sources(names: list[str]) -> list[dict]:
-    """Each region's card tables from moenotes-masterdata-sync, SHA-256 checked against index.json."""
+    """Each region's card and level tables from moenotes-masterdata-sync, SHA-256 checked against index.json."""
     base = env("MASTERDATA_BASE_URL", "https://metadata.bdon.moe").rstrip("/")
     index = json.loads(fetch(f"{base}/index.json").body)
     sources = []
@@ -270,40 +402,37 @@ def master_sources(names: list[str]) -> list[dict]:
         entry = (index.get("regions") or {}).get(region)
         require(isinstance(entry, dict), f"index.json has no region {region}")
         require(re.fullmatch(r"/([a-z]+/)?master/", entry.get("path", "")), f"{region}: unexpected master path")
-        tables, rows = {}, {}
+        tables, rows, growth = {}, {}, {}
+        for table in [info["table"] for info in KINDS.values()] + list(GROWTH_TABLES):
+            raw, data = master_table(base, region, entry, table)
+            tables[table] = {"sha256": digest(raw), "bytes": len(raw)}
+            growth[table] = data
         for kind, info in KINDS.items():
-            name = info["table"] + ".json"
-            expected = (entry.get("files") or {}).get(name)
-            require(isinstance(expected, str) and HEX64.fullmatch(expected), f"{region}: index.json lists no {name}")
-            for _ in range(3):
-                raw = fetch(base + entry["path"] + name).body
-                if digest(raw) == expected:
-                    break
-            else:
-                raise Failure(f"{region} {name}: SHA-256 differs from index.json (the service changed snapshots? run again)")
-            data = json.loads(raw)
-            require(isinstance(data.get("_allData"), list), f"{region} {name}: no _allData")
-            tables[kind] = {"sha256": expected, "bytes": len(raw)}
-            rows[kind] = {decimal(row.get("_id"), f"{region} {kind} id"): row for row in data["_allData"]}
+            rows[kind] = {decimal(row.get("_id"), f"{region} {kind} id"): row for row in growth.pop(info["table"])}
         sources.append({"region": region, "masterVersion": (entry.get("entry") or {}).get("version"),
-                        "tables": tables, "rows": rows})
+                        "tables": tables, "rows": rows, "growth": growth})
     return sources
 
 
 def catalog(sources: list[dict]) -> tuple[list[dict], list[str]]:
-    """The union of every region's cards; a card's identity is the first region's (in RECOGNITION_REGIONS order)."""
+    """The union of every region's cards; a card's identity and level limit are the first region's (in
+    RECOGNITION_REGIONS order)."""
     cards, warnings = [], []
     for kind in KINDS:
         ids = sorted({card_id for source in sources for card_id in source["rows"][kind]}, key=int)
         for card_id in ids:
             present = [source for source in sources if card_id in source["rows"][kind]]
-            first = identity(kind, present[0]["rows"][kind][card_id])
+            row = present[0]["rows"][kind][card_id]
+            first = identity(kind, row)
             matching = [s["region"] for s in present if identity(kind, s["rows"][kind][card_id]) == first]
             differing = [s["region"] for s in present if s["region"] not in matching]
             if differing:
                 warnings.append(f"{kind}:{card_id}: identity in {', '.join(differing)} differs from {present[0]['region']}")
-            cards.append({"kind": kind, "id": card_id, "identity": first, "regions": matching, "source": present[0]["region"]})
+            cards.append({"kind": kind, "id": card_id, "identity": first, "regions": matching, "source": present[0]["region"],
+                          "levelLimit": level_limit(kind, row, present[0]["growth"])})
     require(cards, "the catalog is empty")
+    for kind in KINDS:
+        require(any(card["kind"] == kind for card in cards), f"the catalog has no {kind} cards")
     return cards, warnings
 
 
@@ -323,8 +452,7 @@ def art_entry(api: str, card: dict) -> dict:
             and re.fullmatch(r"/files/[A-Za-z0-9]+", str(entry.get("file"))), f"{key}: invalid listing for {path}")
     size = [meta.get(n) if isinstance(meta.get(n), int) and meta[n] > 0 else None for n in ("width", "height")]
     return {"assetPath": directory + info["file"], "file": entry["file"], "sha256": entry["sha256"],
-            "bytes": entry["bytes"], "width": size[0], "height": size[1],
-            "ext": info["file"].rsplit(".", 1)[1]}
+            "bytes": entry["bytes"], "width": size[0], "height": size[1]}
 
 
 def resolve_art(cards: list[dict]) -> list[dict]:
@@ -334,12 +462,14 @@ def resolve_art(cards: list[dict]) -> list[dict]:
 
 
 def inputs_identity(spec: dict, cards: list[dict], arts: list[dict]) -> str:
-    """What a gallery is made from: the recipe, its libraries, the runtime pins, every card and its artwork."""
+    """What a bundle is made from: the recipe, the pinned files, model parameters, gallery builder and its libraries,
+    every card, its level limit and its artwork."""
     return digest(canonical({
-        "recipe": RECIPE, "features": SIFT, "galleries": spec["galleries"],
-        "runtime": {name: record["sha256"] for name, record in spec["files"].items()},
+        "recipe": RECIPE, "files": {name: record["sha256"] for name, record in spec["files"].items()},
+        "runtime": spec["runtime"], "pipeline": spec["pipeline"], "galleries": spec["galleries"],
         "cards": [{"kind": c["kind"], "id": c["id"], "identity": c["identity"], "regions": c["regions"],
-                   "art": {"sha256": a["sha256"], "assetPath": a["assetPath"]}} for c, a in zip(cards, arts)],
+                   "levelLimit": c["levelLimit"], "art": {"sha256": a["sha256"], "assetPath": a["assetPath"]}}
+                  for c, a in zip(cards, arts)],
     }))
 
 
@@ -370,11 +500,15 @@ def published_state() -> dict | None:
         return None
     pointer = parse_pointer(response.body)
     bundle = json.loads(read_published(f"assets/{pointer['sha256']}.json", pointer["sha256"], pointer["bytes"]))
-    require(bundle.get("format") == "moenotes.recognition-bundle/1", "the published bundle manifest has another format")
+    require(bundle.get("format") in PUBLISHED_FORMATS, "the published bundle manifest has an unknown format")
     record = bundle["files"][bundle["entries"]["gallery"]]
     gallery = json.loads(read_published(record["path"], record["sha256"], record["bytes"]))
     require(isinstance(gallery.get("cards"), list), "the published gallery has no cards")
     return {"pointer": pointer, "bundle": bundle, "gallery": gallery}
+
+
+def sort_keys(keys) -> list[str]:
+    return sorted(keys, key=lambda k: (k.split(":")[0], int(k.split(":")[1])))
 
 
 def card_keys(cards) -> set[str]:
@@ -385,7 +519,7 @@ def superset_problem(state: dict | None, keys: set[str]) -> str | None:
     """A new gallery keeps every published card: a catalog that loses one is not published."""
     if state is None:
         return None
-    lost = sorted(card_keys(state["gallery"]["cards"]) - keys, key=lambda k: (k.split(":")[0], int(k.split(":")[1])))
+    lost = sort_keys(card_keys(state["gallery"]["cards"]) - keys)
     return f"the catalog lacks published card(s) {', '.join(lost)}" if lost else None
 
 
@@ -401,16 +535,15 @@ def cmd_plan() -> None:
     missing_runtime = [name for name, record in runtime_records(spec).items() if not object_present(record)]
     published_inputs = state["bundle"].get("inputsSha256") if state else None
     build = os.environ.get("FORCE") == "true" or published_inputs != inputs
-    new = sorted(card_keys(cards) - card_keys(state["gallery"]["cards"]), key=lambda k: (k.split(":")[0], int(k.split(":")[1]))) \
-        if state else []
+    new = sort_keys(card_keys(cards) - card_keys(state["gallery"]["cards"])) if state else []
     counts = {kind: sum(c["kind"] == kind for c in cards) for kind in KINDS}
-    summary("### Recognition gallery\n\n"
+    summary("### Recognition bundle\n\n"
             + "".join(f"- {s['region']}: master {s['masterVersion']}\n" for s in sources)
             + f"- catalog: {counts['member']} Member, {counts['snap']} Snap cards"
             + (f"; not in the published gallery: {', '.join(new)}" if new else "") + "\n"
             + (f"- published bundle {state['pointer']['sha256'][:12]}\n" if state else "- nothing published yet\n")
             + "".join(f"- warning: {w}\n" for w in warnings)
-            + (f"- runtime files missing from the bucket: {', '.join(missing_runtime)}\n" if missing_runtime else "")
+            + (f"- pinned files missing from the bucket: {', '.join(missing_runtime)}\n" if missing_runtime else "")
             + f"- build: {'yes' if build else 'no (same inputs as the published bundle)'}")
     if problem:
         raise Failure(f"{problem}; the pointer stays on the published bundle")
@@ -431,7 +564,7 @@ def gh_download(repository: str, asset_id: int, target: Path) -> None:
 
 
 def download_release_files(spec: dict, names: list[str], work: Path) -> dict[str, Path]:
-    """Pinned runtime files from this repository's release `release` (a draft needs a token with push access)."""
+    """Pinned files from this repository's release `release` (a draft needs a token with push access)."""
     repository = env("GITHUB_REPOSITORY")
     found = gh_json_lines(["--paginate", f"repos/{repository}/releases", "--jq",
                            f'.[] | select(.tag_name == "{spec["release"]}") | '
@@ -454,13 +587,14 @@ def download_release_files(spec: dict, names: list[str], work: Path) -> dict[str
     return files
 
 
-def cmd_runtime(work: Path, report_path: Path, dry_run: bool) -> None:
+def cmd_runtime(work: Path, report_path: Path, stage: Path, dry_run: bool) -> None:
     spec = runtime_spec()
     records = runtime_records(spec)
-    report = {"format": "moenotes.recognition-runtime-report/1", "dryRun": dry_run, "site": site_base(), "objects": []}
-    states = {}
+    report = {"format": "moenotes.recognition-runtime-report/2", "dryRun": dry_run, "site": site_base(), "objects": [],
+              "staged": []}
+    states, served = {}, {}
     for name, record in records.items():
-        observed = verify_public(record, missing_ok=True)
+        observed = verify_public(record, missing_ok=True, keep=served if name in builder_inputs(spec) else None)
         states[name] = "existing" if observed else "missing"
     missing = [name for name, state in states.items() if state == "missing"]
     files = download_release_files(spec, missing, work) if missing else {}
@@ -473,15 +607,24 @@ def cmd_runtime(work: Path, report_path: Path, dry_run: bool) -> None:
             row["state"] = "missing (checked release file; not uploaded: dry run)"
         report["objects"].append(row)
         write_json(report_path, report)
+    stage.mkdir(parents=True, exist_ok=True)
+    for name in builder_inputs(spec):
+        record = records[name]
+        raw = served[record["path"]] if name not in files else files[name].read_bytes()
+        require(len(raw) == record["bytes"] and digest(raw) == record["sha256"], f"{name}: staged bytes differ from the pin")
+        (stage / record["path"].removeprefix("assets/")).write_bytes(raw)
+        report["staged"].append({"name": name, "sha256": record["sha256"], "bytes": record["bytes"],
+                                 "from": "release" if name in files else "bucket"})
     report["complete"] = True
     write_json(report_path, report)
-    summary(f"- runtime files: {len(records) - len(missing)} in the bucket, {len(missing)} "
-            + ("checked from the release (dry run)" if dry_run else "uploaded from the release"))
+    summary(f"- pinned files: {len(records) - len(missing)} in the bucket, {len(missing)} "
+            + ("checked from the release (dry run)" if dry_run else "uploaded from the release")
+            + f"; {len(report['staged'])} encoder models staged for the gallery builder")
 
 
-# ---------------------------------------------------------------- build
-def fit_box(width: int, height: int, size=MEMBER_SIZE) -> list[float]:
-    """ImageOps.fit's crop box (centering 0.5, no bleed)."""
+# ---------------------------------------------------------------- reference embeddings
+def fit_box(width: float, height: float, size) -> list[float]:
+    """ImageOps.fit's crop box (centering 0.5, no bleed): the largest centred box with the aspect of `size`."""
     live, wanted = width / height, size[0] / size[1]
     if live == wanted:
         crop_width, crop_height = width, height
@@ -493,80 +636,100 @@ def fit_box(width: int, height: int, size=MEMBER_SIZE) -> list[float]:
     return [left, top, left + crop_width, top + crop_height]
 
 
-def card_image(kind: str, raw: bytes, art: dict):
-    """The card as the game's list shows it (BGR): Member squares cropped to the portrait mask, Snaps as decoded."""
-    import numpy as np
+def art_window(spec: dict, kind: str) -> tuple[float, float]:
+    """The artwork window of a list tile in its logical units: the tile less `inset` on every side."""
+    width, height = spec["pipeline"]["tiles"][kind]
+    inset = spec["pipeline"]["encoders"][kind]["inset"]
+    return width - 2 * inset, height - 2 * inset
+
+
+def decode_artwork(raw: bytes, art: dict):
     from PIL import Image
     with Image.open(io.BytesIO(raw)) as image:
         require(art["width"] is None or image.size == (art["width"], art["height"]),
                 f"{art['assetPath']}: decoded size differs from the listing")
         rgb = image.convert("RGB")
     art["width"], art["height"] = rgb.size
-    if kind == "member":
-        box = fit_box(*rgb.size)
-        rgb = rgb.resize(MEMBER_SIZE, Image.Resampling.LANCZOS, box=tuple(box))
-        derive = {"method": "fit", "box": box, "filter": "lanczos3"}
-    else:
-        derive = {"method": "direct"}
-    return np.ascontiguousarray(np.asarray(rgb)[:, :, ::-1]), derive
+    return rgb
 
 
-def sift_features(images: list):
-    """RootSIFT at list-thumbnail resolution, as ournotes-boxlens' build_index: rows, their points (in card pixels)
-    and the index of the card each row belongs to."""
-    import cv2
+def reference_input(spec: dict, kind: str, image) -> tuple:
+    """The encoder input of a card's artwork (float32 3 x H x W, RGB in 0..1) and how it was made. A Member square is
+    fitted (centred, Lanczos) to the artwork window, then resized bilinearly; a Snap image is cropped centred to the
+    window's aspect and resized bilinearly in one step."""
     import numpy as np
-    cv2.setNumThreads(2)
-    sift = cv2.SIFT_create(nfeatures=SIFT["nfeatures"], contrastThreshold=SIFT["contrastThreshold"],
-                           edgeThreshold=SIFT["edgeThreshold"])
-    descriptors, points, owners = [], [], []
-    for index, image in enumerate(images):
-        height, width = image.shape[:2]
-        scale = min(1., SIFT["maxWidth"] / width)
-        gray = cv2.cvtColor(cv2.resize(image, None, fx=scale, fy=scale), cv2.COLOR_BGR2GRAY)
-        mask = np.full(gray.shape, 255, np.uint8)
-        mh, mw = mask.shape
-        # three corner regions are left out, as in build_index
-        mask[int(mh * .82):, :int(mw * .4)] = 0
-        mask[int(mh * .72):, int(mw * .76):] = 0
-        mask[:int(mh * .18), :int(mw * .15)] = 0
-        keypoints, desc = sift.detectAndCompute(gray, mask)
-        if desc is None:
-            continue
-        desc = np.sqrt(desc / (desc.sum(axis=1, keepdims=True) + 1e-8))
-        descriptors.append(desc)
-        points.extend([(k.pt[0] / scale, k.pt[1] / scale) for k in keypoints])
-        owners.extend([index] * len(keypoints))
-    require(descriptors, "no features in any card")
-    return (np.vstack(descriptors).astype("<f4"), np.array(points, np.float32).astype("<f4"),
-            np.array(owners, np.int32).astype("<i4"), cv2.__version__)
+    from PIL import Image
+    height, width = spec["pipeline"]["encoders"][kind]["input"]
+    window = tuple(round(v) for v in art_window(spec, kind))
+    box = fit_box(image.width, image.height, window)
+    if kind == "member":
+        fitted = image.resize(window, Image.Resampling.LANCZOS, box=tuple(box))
+        result = fitted.resize((width, height), Image.Resampling.BILINEAR)
+        steps = [{"box": box, "size": list(window), "filter": "lanczos"}, {"size": [width, height], "filter": "bilinear"}]
+    else:
+        result = image.resize((width, height), Image.Resampling.BILINEAR, box=tuple(box))
+        steps = [{"box": box, "size": [width, height], "filter": "bilinear"}]
+    array = np.asarray(result, np.float32).transpose(2, 0, 1) / 255.
+    return np.ascontiguousarray(array), steps
 
 
-def build_sift_gallery(images: list):
-    rows, points, owners, version = sift_features(images)
-    arrays = {"descriptors": rows, "points": points, "owners": owners}
-    return ({role: (name, arrays[role].tobytes(), list(arrays[role].shape)) for role, name in GALLERY_BUFFERS.items()},
-            {"method": "rootsift", **SIFT, "opencv": version})
+def run_encoder(model: Path, batch):
+    """L2-normalized embeddings of an [N, 3, H, W] batch with ONNX Runtime on one CPU thread."""
+    import onnxruntime as ort
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(str(model), options, providers=["CPUExecutionProvider"])
+    inputs, outputs = session.get_inputs(), session.get_outputs()
+    require([i.name for i in inputs] == ["image"] and [o.name for o in outputs] == ["embedding"],
+            f"{model.name}: the encoder takes `image` and returns `embedding`")
+    return session.run(["embedding"], {"image": batch})[0]
+
+
+def build_encoder_gallery(spec: dict, cards: list[dict], images: list, models: dict[str, Path]) -> dict:
+    """Per kind: the reference embedding of every card (float32 rows, the order of `cards` of that kind)."""
+    import numpy as np
+    out = {}
+    for kind in KINDS:
+        indices = [index for index, card in enumerate(cards) if card["kind"] == kind]
+        inputs, steps = zip(*(reference_input(spec, kind, images[index]) for index in indices))
+        name = spec["pipeline"]["encoders"][kind]["model"]
+        vectors = np.vstack([run_encoder(models[name], np.stack(inputs[start:start + 32]))
+                             for start in range(0, len(indices), 32)]).astype("<f4")
+        require(vectors.ndim == 2 and vectors.shape[0] == len(indices) and vectors.shape[1] >= 1, f"{kind} embeddings: shape")
+        require(np.isfinite(vectors).all() and np.allclose(np.linalg.norm(vectors, axis=1), 1, atol=1e-3),
+                f"{kind} embeddings are not unit vectors")
+        out[kind] = {"cards": indices, "vectors": vectors, "steps": list(steps), "model": name}
+    return out
 
 
 # Gallery builders by recognition-runtime.json `galleries.<name>.builder`.
-BUILDERS = {"sift-rootsift/1": build_sift_gallery}
+BUILDERS = {"encoder-embed/1": build_encoder_gallery}
 
 
-def find_runtime_file(directory: Path, name: str, record: dict) -> Path:
-    wanted = {name.rsplit("/", 1)[1], f"{record['sha256']}.{record['ext']}"}
-    for path in sorted(directory.rglob("*")):
-        if path.is_file() and path.name in wanted:
-            raw = path.read_bytes()
-            if len(raw) == record["bytes"] and digest(raw) == record["sha256"]:
-                return path
-    raise Failure(f"--runtime-dir has no file matching the pin of {name}")
+def file_reference(record: dict) -> dict:
+    return {"file": record["path"].removeprefix("assets/"), "sha256": record["sha256"], "bytes": record["bytes"]}
 
 
-def cmd_build(out: Path, runtime_dir: Path | None) -> None:
+def models_manifest(spec: dict, pins: dict) -> dict:
+    """The Worker's runtime and model stages: every model by file reference, with its parameters from the pins."""
+    pipeline = spec["pipeline"]
+
+    def stage(item: dict) -> dict:
+        return {**item, "model": file_reference(pins[item["model"]])}
+
+    return {"format": MODELS_FORMAT, "source": spec["source"],
+            "runtime": {role: file_reference(pins[name]) for role, name in spec["runtime"].items()},
+            "tiles": pipeline["tiles"], "locator": stage(pipeline["locator"]),
+            **{name: {kind: stage(item) for kind, item in pipeline[name].items()} for name in STAGES}}
+
+
+# ---------------------------------------------------------------- build
+def cmd_build(out: Path, models_dir: Path, runtime_dir: Path | None) -> None:
     spec = runtime_spec()
     check_requirements(spec)
     require(not out.exists() or not any(out.iterdir()), f"{out} is not empty")
+    models = {name: pinned_file(models_dir, name, spec["files"][name]) for name in builder_inputs(spec)}
     site = out / "site"
     (site / "assets").mkdir(parents=True)
     sources = master_sources(regions())
@@ -576,14 +739,12 @@ def cmd_build(out: Path, runtime_dir: Path | None) -> None:
     problem = superset_problem(state, card_keys(cards))
     require(not problem, f"{problem}; nothing was built")
     api = env("RECOGNITION_ASSET_API", "https://assets.bdon.moe").rstrip("/")
-    files, objects = {}, {}
+    files = {}
 
     def add(name: str, raw: bytes, ext: str) -> dict:
         record = {"path": f"assets/{digest(raw)}.{ext}", "sha256": digest(raw), "bytes": len(raw), "contentType": TYPES[ext]}
         files[name] = record
-        if record["path"] not in objects:
-            objects[record["path"]] = raw
-            (site / record["path"]).write_bytes(raw)
+        (site / record["path"]).write_bytes(raw)
         return record
 
     def download(art: dict) -> bytes:
@@ -594,65 +755,51 @@ def cmd_build(out: Path, runtime_dir: Path | None) -> None:
 
     with concurrent.futures.ThreadPoolExecutor(6) as executor:
         artwork = list(executor.map(download, arts))
-    images, records = [], []
-    for card, art, raw in zip(cards, arts, artwork):
-        image, derive = card_image(card["kind"], raw, art)
-        images.append(image)
-        add(f"art/{card['kind']}/{card['id']}.{art['ext']}", raw, art["ext"])
-        records.append({"kind": card["kind"], "id": card["id"], "width": int(image.shape[1]), "height": int(image.shape[0]),
-                        "identity": card["identity"], "regions": card["regions"],
-                        "art": {"file": f"{art['sha256']}.{art['ext']}", "assetPath": art["assetPath"], "bytes": art["bytes"],
-                                "sha256": art["sha256"], "width": art["width"], "height": art["height"], "derive": derive}})
+    images = [decode_artwork(raw, art) for raw, art in zip(artwork, arts)]
+    builder = spec["galleries"]["gallery"]["builder"]
+    embeddings = BUILDERS[builder](spec, cards, images, models)
     pins = runtime_records(spec)
-    buffers, features = BUILDERS[spec["galleries"]["gallery"]["builder"]](images)
-    buffer_records = {}
-    for name, (name_in_bundle, raw, shape) in buffers.items():
-        record = add(name_in_bundle, raw, "bin")
-        buffer_records[name] = {"file": record["path"].removeprefix("assets/"), "sha256": record["sha256"],
-                                "bytes": record["bytes"], "shape": shape}
+    records = [{"kind": c["kind"], "id": c["id"], "identity": c["identity"], "regions": c["regions"], "levelLimit": c["levelLimit"],
+                "art": {"assetPath": a["assetPath"], "bytes": a["bytes"], "sha256": a["sha256"], "width": a["width"],
+                        "height": a["height"]}} for c, a in zip(cards, arts)]
+    sections = {}
+    for kind, item in embeddings.items():
+        for index, steps in zip(item["cards"], item["steps"]):
+            records[index]["art"]["reference"] = steps
+        record = add(f"gallery/{kind}.f32.bin", item["vectors"].tobytes(), "bin")
+        sections[kind] = {"encoder": file_reference(pins[item["model"]]), "dimension": int(item["vectors"].shape[1]),
+                          "cards": item["cards"], "buffer": {**file_reference(record), "shape": list(item["vectors"].shape)}}
     counts = {kind: sum(c["kind"] == kind for c in cards) for kind in KINDS}
     gallery = js_numbers({
-        "format": "ournotes.browser-feature-gallery/3", "source": SOURCE, "features": features,
+        "format": GALLERY_FORMAT, "source": spec["source"], "builder": builder,
         "catalog": [{"region": s["region"], "masterVersion": s["masterVersion"], "tables": s["tables"]} for s in sources],
-        "cards": records, "buffers": buffer_records,
-        "opencv": {role: {"file": pins[name]["path"].removeprefix("assets/"), "sha256": pins[name]["sha256"],
-                          "bytes": pins[name]["bytes"]} for role, name in OPENCV_FILES.items()},
-        "scope": f"Identity and geometry gallery for {counts['member']} Member and {counts['snap']} Snap cards; "
-                 "IDs are exact decimal strings. Files are relative to this manifest.",
+        "cards": records, "embeddings": sections, "scope": SCOPE.format(**counts),
     })
     gallery["galleryId"] = digest(canonical(gallery))
-    fields = {"format": "ournotes.browser-cultivation-assets/2", "source": SOURCE,
-              "runtime": {role: {"file": pins[name]["path"].removeprefix("assets/"), "size": pins[name]["bytes"],
-                                 "sha256": pins[name]["sha256"]} for role, name in FIELD_FILES.items()},
-              "model": {"file": pins[FIELD_MODEL]["path"].removeprefix("assets/"), "size": pins[FIELD_MODEL]["bytes"],
-                        "sha256": pins[FIELD_MODEL]["sha256"]},
-              "scope": FIELD_SCOPE}
     closure = {"gallery/manifest.json": add("gallery/manifest.json", document(gallery), "json")}
-    closure.update({name: files[name] for name in GALLERY_BUFFERS.values()})
-    closure.update({name: pins[name] for name in OPENCV_FILES.values()})
-    closure["fields/manifest.json"] = add("fields/manifest.json", document(fields), "json")
-    closure.update({name: pins[name] for name in (*FIELD_FILES.values(), FIELD_MODEL)})
-    closure.update({name: record for name, record in files.items() if name.startswith("art/")})
+    closure.update({f"gallery/{kind}.f32.bin": files[f"gallery/{kind}.f32.bin"] for kind in embeddings})
+    closure["models/manifest.json"] = add("models/manifest.json", document(models_manifest(spec, pins)), "json")
+    closure.update(pins)
     inputs = inputs_identity(spec, cards, arts)
-    bundle = {"format": "moenotes.recognition-bundle/1", "inputsSha256": inputs,
+    bundle = {"format": BUNDLE_FORMAT, "inputsSha256": inputs,
               "previous": state["pointer"] if state else None,
-              "entries": {"gallery": "gallery/manifest.json", "fields": "fields/manifest.json"},
+              "entries": {"gallery": "gallery/manifest.json", "models": "models/manifest.json"},
               "counts": counts, "files": closure}
     bundle_record = add("bundle.json", document(bundle), "json")
     if runtime_dir:
         for name, record in pins.items():
-            shutil.copyfile(find_runtime_file(runtime_dir, name, spec["files"][name]), site / record["path"])
+            shutil.copyfile(pinned_file(runtime_dir, name, spec["files"][name]), site / record["path"])
     pointer = pointer_document(bundle_record["sha256"], bundle_record["bytes"])
     (site / POINTER).parent.mkdir(parents=True, exist_ok=True)
     (site / POINTER).write_bytes(pointer)
     previous_cards = {f"{c['kind']}:{c['id']}": c for c in state["gallery"]["cards"]} if state else {}
-    report = {"format": "moenotes.recognition-build/1", "inputsSha256": inputs, "previous": bundle["previous"],
+    report = {"format": "moenotes.recognition-build/2", "inputsSha256": inputs, "previous": bundle["previous"],
               "bundle": {"sha256": bundle_record["sha256"], "bytes": bundle_record["bytes"]},
               "gallery": {**{k: closure["gallery/manifest.json"][k] for k in ("sha256", "bytes")}, "galleryId": gallery["galleryId"],
-                          "rows": buffer_records["owners"]["shape"][0]},
-              "fields": {k: closure["fields/manifest.json"][k] for k in ("sha256", "bytes")},
+                          "rows": {kind: len(item["cards"]) for kind, item in embeddings.items()}},
+              "models": {k: closure["models/manifest.json"][k] for k in ("sha256", "bytes")},
               "counts": counts, "catalog": gallery["catalog"],
-              "newCards": sorted(card_keys(cards) - set(previous_cards), key=lambda k: (k.split(":")[0], int(k.split(":")[1]))),
+              "newCards": sort_keys(card_keys(cards) - set(previous_cards)),
               "changedArtwork": [f"{r['kind']}:{r['id']}" for r in records
                                  if f"{r['kind']}:{r['id']}" in previous_cards
                                  and previous_cards[f"{r['kind']}:{r['id']}"].get("art", {}).get("sha256") != r["art"]["sha256"]],
@@ -660,7 +807,7 @@ def cmd_build(out: Path, runtime_dir: Path | None) -> None:
               "objects": [{"name": name, **record, "origin": "runtime" if name in pins else "build"} for name, record in closure.items()]}
     write_json(out / "report.json", report)
     summary(f"- built bundle {bundle_record['sha256'][:12]}: {counts['member']} Member, {counts['snap']} Snap cards, "
-            f"{report['gallery']['rows']} feature rows"
+            f"embeddings by {builder}"
             + ("; the first bundle" if state is None else f"; new: {', '.join(report['newCards'])}" if report["newCards"] else "")
             + (f"; changed artwork: {', '.join(report['changedArtwork'])}" if report["changedArtwork"] else ""))
 
@@ -711,7 +858,7 @@ def local_closure(out: Path, spec: dict) -> tuple[dict, bytes, dict]:
     bundle_raw = (site / f"assets/{pointer['sha256']}.json").read_bytes()
     require(len(bundle_raw) == pointer["bytes"] and digest(bundle_raw) == pointer["sha256"], "bundle manifest differs from the pointer")
     bundle = json.loads(bundle_raw)
-    require(bundle.get("format") == "moenotes.recognition-bundle/1", "bundle manifest format")
+    require(bundle.get("format") == BUNDLE_FORMAT, "bundle manifest format")
     pins = runtime_records(spec)
     for name, record in bundle["files"].items():
         match = ASSET_PATH.fullmatch(record.get("path", ""))
@@ -726,15 +873,17 @@ def local_closure(out: Path, spec: dict) -> tuple[dict, bytes, dict]:
         else:
             require(name in pins, f"{name}: built object missing from {site}")
     entries = bundle["entries"]
+    require(set(entries) == {"gallery", "models"}, "the bundle names its gallery and models manifests")
     gallery = json.loads((site / bundle["files"][entries["gallery"]]["path"]).read_bytes())
     claimed = gallery.pop("galleryId")
     require(digest(canonical(gallery)) == claimed, "galleryId differs from the gallery manifest")
-    referenced = {f"art/{c['kind']}/{c['id']}.{c['art']['file'].rsplit('.', 1)[1]}": c["art"]["sha256"] for c in gallery["cards"]}
-    referenced.update({name: gallery["buffers"][role]["sha256"] for role, name in GALLERY_BUFFERS.items()})
-    referenced.update({OPENCV_FILES[role]: r["sha256"] for role, r in gallery["opencv"].items()})
-    fields = json.loads((site / bundle["files"][entries["fields"]]["path"]).read_bytes())
-    referenced.update({FIELD_FILES[role]: r["sha256"] for role, r in fields["runtime"].items()})
-    referenced[FIELD_MODEL] = fields["model"]["sha256"]
+    models = json.loads((site / bundle["files"][entries["models"]]["path"]).read_bytes())
+    require(models == js_numbers(models_manifest(spec, pins)), "the models manifest differs from recognition-runtime.json")
+    referenced = {name: pins[name]["sha256"] for name in pins}
+    for kind, section in gallery["embeddings"].items():
+        referenced[f"gallery/{kind}.f32.bin"] = section["buffer"]["sha256"]
+        require(section["encoder"]["sha256"] == models["encoders"][kind]["model"]["sha256"],
+                f"{kind} embeddings were made by another encoder than the bundle's")
     for name, sha in referenced.items():
         require(bundle["files"].get(name, {}).get("sha256") == sha, f"{name}: manifests and bundle differ")
     require(set(referenced) | set(entries.values()) == set(bundle["files"]), "the bundle lists objects no manifest uses")
@@ -778,10 +927,10 @@ def cmd_publish(out: Path, dry_run: bool) -> None:
         own = [n for n in missing if n not in unavailable]
         summary(f"- dry run: {report['counts']['existing']} objects in the bucket, {len(own)} to upload "
                 f"({sum(records[n]['bytes'] for n in own) / 1e6:.1f} MB)"
-                + (f", runtime files the runtime job uploads first: {', '.join(unavailable)}" if unavailable else "")
+                + (f", pinned files the runtime job uploads first: {', '.join(unavailable)}" if unavailable else "")
                 + f"; the pointer would name {pointer['sha256'][:12]}")
         return
-    require(not unavailable, f"runtime file(s) missing from the bucket: {', '.join(unavailable)} (the runtime job uploads them)")
+    require(not unavailable, f"pinned file(s) missing from the bucket: {', '.join(unavailable)} (the runtime job uploads them)")
     s3 = s3_client() if missing or current != pointer else None
     manifests = set(bundle["entries"].values())
     groups = [[n for n in missing if n not in manifests and n != bundle_name],
@@ -831,9 +980,11 @@ def main(argv: list[str]) -> None:
     runtime = commands.add_parser("runtime")
     runtime.add_argument("--work", type=Path, required=True)
     runtime.add_argument("--report", type=Path, required=True)
+    runtime.add_argument("--stage", type=Path, required=True)
     runtime.add_argument("--dry-run", action="store_true")
     build = commands.add_parser("build")
     build.add_argument("out", type=Path)
+    build.add_argument("--models", type=Path, required=True)
     build.add_argument("--runtime-dir", type=Path)
     publish = commands.add_parser("publish")
     publish.add_argument("out", type=Path)
@@ -845,9 +996,9 @@ def main(argv: list[str]) -> None:
         elif args.command == "requirements":
             print(" ".join(requirements(runtime_spec())))
         elif args.command == "runtime":
-            cmd_runtime(args.work, args.report, args.dry_run)
+            cmd_runtime(args.work, args.report, args.stage, args.dry_run)
         elif args.command == "build":
-            cmd_build(args.out, args.runtime_dir)
+            cmd_build(args.out, args.models, args.runtime_dir)
         else:
             cmd_publish(args.out, args.dry_run)
     except Failure as error:
