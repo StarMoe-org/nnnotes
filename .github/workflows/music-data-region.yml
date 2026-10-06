@@ -152,6 +152,9 @@ jobs:
           python .github/scripts/music_data.py build "$WORK/out"
 
       - name: Keep the chart statistics for the next build
+        # also after a failed build: nnnotes writes each chart's statistics as soon as they are measured, and a later
+        # failure (a jacket the game API cannot serve) leaves them valid
+        if: always()
         uses: actions/cache/save@v6
         with:
           path: ${{ env.MUSIC_DATA_STATS_CACHE }}
