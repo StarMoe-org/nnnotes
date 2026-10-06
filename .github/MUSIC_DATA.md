@@ -93,10 +93,10 @@ extend the existing linear plain-skill UI domain or derive source rank threshold
      `provenance.client`; nnnotes also reads the bundles the APK carries, as in the story site's builds), the decoded
      master data of moenotes-masterdata-sync (every file SHA-256 checked against `index.json`, `MasterManifest.json`
      included);
-   - the pinned ournotes-deck source (`MUSIC_DATA_DECK_SOURCE`, the commit `rust/Cargo.lock` pins, clean before and
-     after the builds): its CLI, then `wasm/replay` and `wasm/recommend`, each with its own lockfile, for
-     `wasm32-unknown-unknown` and through `wasm-bindgen --target web` (`ournotes_replay`, `ournotes_recommend`), each
-     package with a `build.json` of its commit and JS/WASM SHA-256;
+   - the replay and recommendation engines: `ournotes-replay-wasm-v<version>.tar.gz` and
+     `ournotes-recommend-wasm-v<version>.tar.gz` of the ournotes-deck release `v<version>`, the version of the
+     `ournotes-sim` package `rust/Cargo.lock` pins, each checked against the release's `SHA256SUMS`; nnnotes takes
+     their web packages after checking each `build-info.json` (module, commit, file SHA-256) against its deck model;
    - `nnnotes music-data --decoded-master --jackets jackets --replay-dir replay --replay-engine ... --recommend-engine
      ... -o music-data.json`: the master data as decoded (no
      master key), `provenance.master` the manifest's version and SHA-256 of the files as served; the charts, cue
@@ -152,8 +152,8 @@ nothing being published, `plan` finds no `build.json` and every run builds.
 
 The `replay` gate checks the replay inventory: every resource's SHA-256 and size, the immutable directory, the chart
 IDs, the replay engine and, required for a new build, `manifest.recommendEngine`: its model commit is the replay
-engine's and the music data's, and its `build.json` (`ournotes.recommend-engine/1`, clean) names the JS and WASM
-SHA-256. The recommendation engine's files are uploaded and read back before the manifest like every other resource.
+engine's and the music data's. Each engine's `build-info.json`, from its ournotes-deck release package, names that
+module, the model commit and the SHA-256 of the JS and WASM files. The recommendation engine's files are uploaded and read back before the manifest like every other resource.
 
 The replay inventory also accepts `manifest.snapLabels` (`nnnotes.replay-labels/1`). Its SHA/size, region,
 master version and all 13 served-table hashes must match the checked music-data provenance. It is uploaded and

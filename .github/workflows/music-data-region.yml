@@ -119,21 +119,6 @@ jobs:
         # builds the extension module nnnotes._deck: the deck model at the commit rust/Cargo.toml pins
         run: uv pip install --system -e ".[test]" boto3
 
-      - name: Pinned model revision
-        id: model
-        run: |
-          revision=$(python -c 'import sys; sys.path.insert(0, ".github/scripts"); import music_data; print(music_data.deck_commit())')
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v7
-        with:
-          repository: empty-sekai/ournotes-deck
-          ref: ${{ steps.model.outputs.revision }}
-          path: pinned-replay-model
-      - name: WASM toolchain
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo install wasm-bindgen-cli --version 0.2.127 --locked
-
       - name: Gate self-test
         env:
           MUSIC_DATA_PAGE: ${{ env.WORK }}/page/examples/songs
@@ -144,7 +129,6 @@ jobs:
 
       - name: Build
         env:
-          MUSIC_DATA_DECK_SOURCE: ${{ github.workspace }}/pinned-replay-model
           NNNOTES_BUNDLE_KEY: ${{ secrets.NNNOTES_BUNDLE_KEY }}
           NNNOTES_BUNDLE_NONCE_SEED: ${{ secrets.NNNOTES_BUNDLE_NONCE_SEED }}
           # A new cache on every run, never actions/cache: nnnotes keeps a downloaded catalog file for good (a cached

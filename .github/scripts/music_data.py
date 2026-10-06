@@ -10,7 +10,8 @@ decoded master data, checked by quality gates and published into the story site'
     master OUT            every file of the snapshot of $MASTERDATA_REGION into OUT (SHA-256 checked against
                           index.json, MasterManifest.json included) and its index entry as OUT.snapshot.json
     build OUT             `nnnotes music-data --decoded-master --jackets OUT/jackets -o OUT/music-data.json` ([paths]
-                          master: the master step's OUT), its printed summary in OUT/music-data.summary.json
+                          master: the master step's OUT) with the replay and recommendation engines of the pinned
+                          ournotes-deck release, its printed summary in OUT/music-data.summary.json
     check OUT MASTER PAGE the quality gates (.github/MUSIC_DATA.md) on OUT/music-data.json, with the published file
                           as the baseline and PAGE the chart data page's modules (examples/songs) for the smoke test;
                           the report in OUT/check.json, and OUT/build.json (the build marker) when every gate passed;
@@ -52,7 +53,7 @@ FORMAT = "nnnotes.music-data/1"
 BUILD_FORMAT = "moenotes.music-data-build/1"
 # This script's own version of a build: bump it when what it builds or publishes changes, so that the next run builds
 # although the master data, the deck model and nnnotes are the same.
-RECIPE = 6
+RECIPE = 7
 FILE, FILE_BR, MARKER, JACKETS, ARCHIVE = "music-data.json", "music-data.json.br", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
 SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
@@ -87,11 +88,10 @@ SONG_TABLES = ("MasterLiveMusic", "MasterLiveMusicScore", "MasterText", "MasterB
 REPLAY_LABEL_TABLES = ("MasterSupportSkill", "MasterSupportSkillEffect", "MasterGekisouSupportSkill",
                        "MasterGekisouSupportSkillEffect", "MasterText", "MasterSkillConditionSet", "MasterSkillCondition",
                        "MasterSkillCumulativeCondition", "MasterSkillTarget", "MasterCharacter", "MasterMemberCard", "MasterSupportCard", "MasterBand")
-# the web WASM packages built from the pinned model source: its package directory, the crate's WASM file, the
-# wasm-bindgen --out-name, the build.json format and the build directory under the build step's OUT
-ENGINES = (("wasm/replay", "ournotes_replay_wasm", "ournotes_replay", "ournotes.replay-engine/1", "replay-engine-build"),
-           ("wasm/recommend", "ournotes_recommend_wasm", "ournotes_recommend", "ournotes.recommend-engine/1",
-            "recommend-engine-build"))
+# the web WASM packages (replay, recommendation) of the ournotes-deck release of the pinned deck model: the release
+# tagged v<version> of the ournotes-sim package in rust/Cargo.lock
+DECK_RELEASES = "https://github.com/empty-sekai/ournotes-deck/releases/download"
+ENGINES = ("replay", "recommend")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 LISTED = 20                                         # failures and warnings listed per gate
@@ -155,18 +155,25 @@ def exists(key: str) -> bool:
 
 
 # ---------------------------------------------------------------- the inputs of a build
-def deck_commit(root: Path = Path(".")) -> str:
-    """The ournotes-deck commit nnnotes builds its deck model with: the ournotes-sim package in rust/Cargo.lock."""
+def deck_package(root: Path = Path(".")) -> tuple[str, str]:
+    """The ournotes-sim package nnnotes builds its deck model with, in rust/Cargo.lock: its version and its
+    ournotes-deck commit."""
     lock = root / "rust" / "Cargo.lock"
     if not lock.is_file():
         fail("no rust/Cargo.lock: this nnnotes has no music-data command with the deck model (sync the fork with "
              "upstream, .github/MUSIC_DATA.md)")
     for block in lock.read_text(encoding="utf-8").split("[[package]]"):
         if re.search(r'^name = "ournotes-sim"$', block, re.M):
+            version = re.search(r'^version = "([^"]+)"$', block, re.M)
             m = re.search(r'^source = "git\+[^"#]*#([0-9a-f]{40})"$', block, re.M)
-            if m:
-                return m.group(1)
+            if version and m:
+                return version.group(1), m.group(1)
     fail("rust/Cargo.lock has no ournotes-sim git commit")
+
+
+def deck_commit(root: Path = Path(".")) -> str:
+    """The ournotes-deck commit nnnotes builds its deck model with."""
+    return deck_package(root)[1]
 
 
 def nnnotes_commit(root: Path = Path(".")) -> str:
@@ -337,7 +344,7 @@ def cmd_build(out: str) -> None:
     usage = subprocess.run(nnnotes + ["music-data", "--help"], capture_output=True, text=True).stdout
     if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine", "--recommend-engine")):
         fail("the installed nnnotes lacks decoded-master/replay/recommend export (sync the fork with upstream)")
-    engine, recommend = build_replay_engine(o)
+    engine, recommend = release_engines(o)
     if env("MASTERDATA_REGION") == "jp":
         import jp_vpngate
         jp_vpngate.start()
@@ -357,38 +364,27 @@ def cmd_build(out: str) -> None:
             f"{short(r.get('deck'))}, {r.get('bytes')} bytes, sha256 {short(r.get('sha256'))}")
 
 
-def build_replay_engine(out: Path) -> tuple[Path, ...]:
-    """Build the CLI and the web WASM packages (ENGINES: replay, recommendation) from the same pinned clean model
-    source as nnnotes._deck; returns their directories, each with its build.json."""
-    source = Path(env("MUSIC_DATA_DECK_SOURCE")).resolve()
-    pinned = deck_commit()
-    def check_source():
-        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-        changed = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=all",
-                                            "--", "Cargo.toml", "Cargo.lock", "crates",
-                                            *(package for package, *_ in ENGINES)], text=True).strip()
-        if head != pinned or changed:
-            fail("replay model source is dirty or differs from nnnotes' pinned deck commit")
-    check_source()
-    subprocess.run(["cargo", "build", "--manifest-path", str(source / "Cargo.toml"),
-                    "--release", "--locked", "-j2", "--bin", "ournotes-deck"], check=True)
-    target = out.parent / "replay-target"
-    engines = []
-    for package, crate, name, _, directory in ENGINES:
-        engine = out / directory
-        engine.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["cargo", "build", "--manifest-path", str(source / package / "Cargo.toml"), "--target-dir",
-                        str(target), "--target", "wasm32-unknown-unknown", "--release", "--locked", "-j2"], check=True)
-        subprocess.run(["wasm-bindgen", "--target", "web", "--out-dir", str(engine), "--out-name", name,
-                        str(target / f"wasm32-unknown-unknown/release/{crate}.wasm")], check=True)
-        engines.append(engine)
-    check_source()
-    for engine, (_, _, name, build_format, _) in zip(engines, ENGINES):
-        built = {"format": build_format, "commit": pinned, "workingTreeDirty": False,
-                 "jsSha256": sha256((engine / f"{name}.js").read_bytes()),
-                 "wasmSha256": sha256((engine / f"{name}_bg.wasm").read_bytes())}
-        (engine / "build.json").write_text(json.dumps(built, indent=2) + "\n", encoding="utf8")
-    return tuple(engines)
+def release_engines(out: Path) -> tuple[Path, ...]:
+    """Download the web WASM packages (ENGINES) of the ournotes-deck release of the pinned deck model into OUT, each
+    checked against the release's SHA256SUMS; returns their paths. nnnotes checks each package's build-info.json
+    against the deck model it is built with."""
+    version, _ = deck_package()
+    base = f"{DECK_RELEASES}/v{version}"
+    sums = {}
+    for line in get(f"{base}/SHA256SUMS").decode("utf-8").splitlines():   # sha256sum's "<digest>  <name>"
+        digest, _, name = line.partition("  ")
+        sums[name] = digest
+    packages = []
+    for module in ENGINES:
+        name = f"ournotes-{module}-wasm-v{version}.tar.gz"
+        if name not in sums:
+            fail(f"ournotes-deck v{version} publishes no {name}")
+        data = get(f"{base}/{name}", timeout=300)
+        if sha256(data) != sums[name]:
+            fail(f"{name}: SHA-256 differs from the SHA256SUMS of ournotes-deck v{version}")
+        (out / name).write_bytes(data)
+        packages.append(out / name)
+    return tuple(packages)
 
 
 def replay_resources(out: Path, doc: dict) -> list[Path]:
@@ -450,18 +446,20 @@ def replay_resources(out: Path, doc: dict) -> list[Path]:
     expected_ids = sorted(c["scoreId"] for s in doc["songs"] for c in s["charts"])
     if sorted(c["scoreId"] for c in manifest["charts"]) != expected_ids or pointer.get("charts") != len(expected_ids):
         raise ValueError("replay chart IDs/count differ from music data")
-    built = json.loads(local(manifest_path.parent, engine["build"]["url"]).read_bytes())
-    if (built.get("format") != "ournotes.replay-engine/1" or built.get("commit") != engine["model"]["commit"]
-            or built.get("workingTreeDirty") is True or built.get("jsSha256") != engine["js"]["sha256"]
-            or built.get("wasmSha256") != engine["wasm"]["sha256"]):
-        raise ValueError("replay engine build identity is inconsistent or dirty")
-    if recommend is not None:
-        built = json.loads(local(manifest_path.parent, recommend["build"]["url"]).read_bytes())
-        if (built.get("format") != "ournotes.recommend-engine/1" or built.get("commit") != recommend["model"]["commit"]
-                or built.get("workingTreeDirty") is not False or built.get("jsSha256") != recommend["js"]["sha256"]
-                or built.get("wasmSha256") != recommend["wasm"]["sha256"]):
-            raise ValueError("recommend engine build identity is inconsistent or dirty")
+    for module, entry in (("replay", engine), ("recommend", recommend)):
+        if entry is not None:
+            check_engine_build(module, entry, json.loads(local(manifest_path.parent, entry["build"]["url"]).read_bytes()))
     return paths + [manifest_path]
+
+
+def check_engine_build(module: str, entry: dict, built: dict) -> None:
+    """An engine of a replay manifest against `built`, the build-info.json of its ournotes-deck release package: the
+    module, the model commit and the SHA-256 of the web JS and WASM files."""
+    files = built.get("files") if isinstance(built.get("files"), dict) else {}
+    stem = f"web/ournotes_{module}_wasm"
+    if (built.get("kind") != "wasm" or built.get("module") != module or built.get("commit") != entry["model"]["commit"]
+            or files.get(f"{stem}.js") != entry["js"]["sha256"] or files.get(f"{stem}_bg.wasm") != entry["wasm"]["sha256"]):
+        raise ValueError(f"{module} engine differs from the build-info.json of its release package")
 
 
 # ---------------------------------------------------------------- the gates
