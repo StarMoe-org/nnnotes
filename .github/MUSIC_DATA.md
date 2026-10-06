@@ -98,7 +98,10 @@ extend the existing linear plain-skill UI domain or derive source rank threshold
      `ournotes-sim` package `rust/Cargo.lock` pins, each checked against the release's `SHA256SUMS`; nnnotes takes
      their web packages after checking each `build-info.json` (module, commit, file SHA-256) against its deck model;
    - `nnnotes music-data --decoded-master --jackets jackets --replay-dir replay --replay-engine ... --recommend-engine
-     ... -o music-data.json`: the master data as decoded (no
+     ... --stats-cache $MUSIC_DATA_STATS_CACHE -o music-data.json`: the deck statistics of the last build of the
+     region come back from `actions/cache` (derived numbers the file publishes, no game files), and only the charts
+     whose deck model sources (`provenance.deck.sourceSha256`), options, master tables or chart changed are measured
+     again; the summary counts both. The master data as decoded (no
      master key), `provenance.master` the manifest's version and SHA-256 of the files as served; the charts, cue
      sheets and jackets from the TW catalog, downloaded afresh on every run (never `actions/cache`: nnnotes keeps a
      downloaded catalog for good, and the cache holds decrypted game files);

@@ -11,7 +11,8 @@ decoded master data, checked by quality gates and published into the story site'
                           index.json, MasterManifest.json included) and its index entry as OUT.snapshot.json
     build OUT             `nnnotes music-data --decoded-master --jackets OUT/jackets -o OUT/music-data.json` ([paths]
                           master: the master step's OUT) with the replay and recommendation engines of the pinned
-                          ournotes-deck release, its printed summary in OUT/music-data.summary.json
+                          ournotes-deck release and the chart statistics cache $MUSIC_DATA_STATS_CACHE, its
+                          printed summary in OUT/music-data.summary.json
     check OUT MASTER PAGE the quality gates (.github/MUSIC_DATA.md) on OUT/music-data.json, with the published file
                           as the baseline and PAGE the chart data page's modules (examples/songs) for the smoke test;
                           the report in OUT/check.json, and OUT/build.json (the build marker) when every gate passed;
@@ -342,15 +343,18 @@ def cmd_build(out: str) -> None:
     o.mkdir(parents=True, exist_ok=True)
     nnnotes = [sys.executable, "-m", "nnnotes"]
     usage = subprocess.run(nnnotes + ["music-data", "--help"], capture_output=True, text=True).stdout
-    if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine", "--recommend-engine")):
-        fail("the installed nnnotes lacks decoded-master/replay/recommend export (sync the fork with upstream)")
+    if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine", "--recommend-engine",
+                                          "--stats-cache")):
+        fail("the installed nnnotes lacks decoded-master/replay/recommend export or the statistics cache (sync the "
+             "fork with upstream)")
     engine, recommend = release_engines(o)
     if env("MASTERDATA_REGION") == "jp":
         import jp_vpngate
         jp_vpngate.start()
     cmd = nnnotes + ["music-data", "--decoded-master", "--jackets", str(o / "jackets"),
                     "--replay-dir", str(o / "replay"), "--replay-engine", str(engine),
-                    "--recommend-engine", str(recommend), "-o", str(o / FILE)]
+                    "--recommend-engine", str(recommend), "--stats-cache", env("MUSIC_DATA_STATS_CACHE"),
+                    "-o", str(o / FILE)]
     print("+ " + " ".join(cmd[1:]), flush=True)
     with open(o / "music-data.summary.json", "wb") as f:
         status = subprocess.run(cmd, stdout=f).returncode
@@ -360,8 +364,10 @@ def cmd_build(out: str) -> None:
     import brotli
     (o / FILE_BR).write_bytes(brotli.compress(raw, quality=9))
     r = json.loads((o / "music-data.summary.json").read_text(encoding="utf-8"))
+    stats = r.get("deckStats") or {}
     summary(f"- built: {r.get('songs')} songs, {r.get('charts')} charts, {r.get('jackets')} jackets, deck "
-            f"{short(r.get('deck'))}, {r.get('bytes')} bytes, sha256 {short(r.get('sha256'))}")
+            f"{short(r.get('deck'))}, {r.get('bytes')} bytes, sha256 {short(r.get('sha256'))}; chart statistics "
+            f"{stats.get('cached')} cached, {stats.get('measured')} measured")
 
 
 def release_engines(out: Path) -> tuple[Path, ...]:
