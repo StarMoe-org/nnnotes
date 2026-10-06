@@ -38,6 +38,10 @@ env:
   PYTHON_VERSION: "3.13"
   PYTHONPATH: src
   WORK: ${{ github.workspace }}/music-data-work
+  # The deck statistics of every chart of the last build, under the SHA-256 of the model sources, options, master
+  # tables and chart they come from (nnnotes music-data --stats-cache): derived numbers the file publishes, no game
+  # files. A build measures only the charts whose inputs changed.
+  MUSIC_DATA_STATS_CACHE: ${{ github.workspace }}/music-data-work/stats-cache
   # Bundle keys come from secrets; catalog versions and CDN roots come from the saved master snapshot.
   NNNOTES_CATALOG_REGION: ${{ inputs.region == 'jp' && 'jp' || 'tw' }}
   NNNOTES_CATALOG_LANGUAGE: ${{ inputs.region == 'jp' && 'ja' || 'zh-Hant' }}
@@ -127,6 +131,13 @@ jobs:
       - name: Master data
         run: python .github/scripts/music_data.py master "$WORK/master"
 
+      - name: Chart statistics of the last build
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.MUSIC_DATA_STATS_CACHE }}
+          key: music-data-stats-${{ inputs.region }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: music-data-stats-${{ inputs.region }}-
+
       - name: Build
         env:
           NNNOTES_BUNDLE_KEY: ${{ secrets.NNNOTES_BUNDLE_KEY }}
@@ -139,6 +150,12 @@ jobs:
         run: |
           if [ "${{ inputs.region }}" = "jp" ]; then python .github/scripts/story_site.py jp-check; fi
           python .github/scripts/music_data.py build "$WORK/out"
+
+      - name: Keep the chart statistics for the next build
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.MUSIC_DATA_STATS_CACHE }}
+          key: music-data-stats-${{ inputs.region }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Gates
         id: gates
