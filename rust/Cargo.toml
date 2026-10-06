@@ -1,7 +1,7 @@
 [package]
 name = "nnnotes-deck"
 # the nnnotes version (src/nnnotes/__init__.py); the wheel takes its version from here
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 description = "nnnotes._deck: the ournotes-sim chart statistics as a Python extension module"
@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.29", features = ["abi3-py311"] }
 # the deck model, the crate ournotes-sim of the ournotes-deck repository, pinned to the commit of a release;
 # .github/workflows/deck.yml opens a pull request when ournotes-deck publishes a newer release
-ournotes-sim = { git = "https://github.com/empty-sekai/ournotes-deck", rev = "76e96b617842bdcc031cce98e3dfeead27ddbb85" }
+ournotes-sim = { git = "https://github.com/empty-sekai/ournotes-deck", rev = "31d74487c4fd9e5dc3c1d4f34be8dee8f1a75b0e" }
 serde_json = { version = "1", features = ["raw_value", "arbitrary_precision"] }
 
 [profile.release]
