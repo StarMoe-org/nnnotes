@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 
 from http_compression import decode_content
-from music_data import GATES, REPLAY_LABEL_TABLES
+from music_data import GATES, REPLAY_LABEL_TABLES, check_engine_build
 
 BASE = "https://storage.bdon.moe/moenotes/music-data/"
 
@@ -100,11 +100,8 @@ def main():
                    or not isinstance((labels.get("tables", {}).get(name) or {}).get("rows"), list)
                    for name in REPLAY_LABEL_TABLES)):
         raise ValueError("published deck/labels differ from the frozen source")
-    engine_build = json.loads((out / str(manifest_path.parent / relative(manifest["engine"]["build"]["url"]))).read_bytes())
-    if (engine_build["commit"] != model or engine_build.get("workingTreeDirty") is True or
-            engine_build["jsSha256"] != manifest["engine"]["js"]["sha256"] or
-            engine_build["wasmSha256"] != manifest["engine"]["wasm"]["sha256"]):
-        raise ValueError("published engine build metadata is inconsistent")
+    check_engine_build("replay", manifest["engine"], json.loads(
+        (out / str(manifest_path.parent / relative(manifest["engine"]["build"]["url"]))).read_bytes()))
     marker_sha = hashlib.sha256(marker_raw).hexdigest()
     fetch(PurePosixPath("build.json"), marker_sha, args.out / "marker-after.json", len(marker_raw))
     pin = args.out / "page-pin"

@@ -553,12 +553,13 @@ def test_report_markdown(tmp_path):
     assert "- scenarios failure: chart 10 (100001 easy): offSeeds missing, expected exactly one" in text_
 
 
-def test_deck_commit_from_cargo_lock(tmp_path):
+def test_deck_package_from_cargo_lock(tmp_path):
     lock = tmp_path / "rust" / "Cargo.lock"
     lock.parent.mkdir()
     lock.write_text('[[package]]\nname = "pyo3"\nversion = "0.29.0"\n\n[[package]]\nname = "ournotes-sim"\n'
                     'version = "0.0.1"\nsource = "git+https://github.com/empty-sekai/ournotes-deck?rev=' + "a" * 40
                     + "#" + "b" * 40 + '"\n', encoding="utf-8")
+    assert music_data.deck_package(tmp_path) == ("0.0.1", "b" * 40)
     assert music_data.deck_commit(tmp_path) == "b" * 40
     with pytest.raises(SystemExit, match="sync the fork"):
         music_data.deck_commit(tmp_path / "nowhere")
@@ -780,21 +781,23 @@ def replay_out(out, recommend=True):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
         return {"url": url, "sha256": music_data.sha256(raw), "bytes": len(raw)}
-    js = resource("engine/ournotes_replay.js", b"export class ReplaySession {}")
-    wasm = resource("engine/ournotes_replay_bg.wasm", b"\0asm\x01\0\0\0")
-    built = resource("engine/build.json", json.dumps({"format": "ournotes.replay-engine/1", "commit": commit,
-                     "jsSha256": js["sha256"], "wasmSha256": wasm["sha256"]}).encode())
+    def engine(prefix, module, js_raw, wasm_raw):
+        # the files nnnotes takes from an ournotes-deck release package: web JS, web WASM and build-info.json
+        stem = f"ournotes_{module}_wasm"
+        js = resource(f"{prefix}/{stem}.js", js_raw)
+        wasm = resource(f"{prefix}/{stem}_bg.wasm", wasm_raw)
+        built = resource(f"{prefix}/build-info.json", json.dumps({
+            "version": "0.0.2", "tag": "v0.0.2", "commit": commit, "kind": "wasm", "module": module,
+            "files": {f"web/{stem}.js": js["sha256"], f"web/{stem}_bg.wasm": wasm["sha256"]}}).encode())
+        return {"model": {"commit": commit}, "js": js, "wasm": wasm, "build": built}
     charts = [{"scoreId": c["scoreId"], **resource(f"charts/{c['scoreId']}.json", b"{}")}
               for song in doc["songs"] for c in song["charts"]]
     manifest = {"format": "nnnotes.replay-manifest/1", "deckData": resource("deck-data.json", b"{}"),
-                "charts": charts, "engine": {"model": {"commit": commit}, "requestFormat": "ournotes.replay/1",
-                                                  "js": js, "wasm": wasm, "build": built}}
+                "charts": charts, "engine": {"requestFormat": "ournotes.replay/1", **engine(
+                    "engine", "replay", b"export class ReplaySession {}", b"\0asm\x01\0\0\0")}}
     if recommend:
-        js = resource("recommend/ournotes_recommend.js", b"export class RecommendationSession {}")
-        wasm = resource("recommend/ournotes_recommend_bg.wasm", b"\0asm\x01\0\0\0recommend")
-        built = resource("recommend/build.json", json.dumps({"format": "ournotes.recommend-engine/1", "commit": commit,
-                         "workingTreeDirty": False, "jsSha256": js["sha256"], "wasmSha256": wasm["sha256"]}).encode())
-        manifest["recommendEngine"] = {"model": {"commit": commit}, "js": js, "wasm": wasm, "build": built}
+        manifest["recommendEngine"] = engine("recommend", "recommend", b"export class RecommendationSession {}",
+                                             b"\0asm\x01\0\0\0recommend")
     raw_manifest = json.dumps(manifest).encode()
     resource("manifest.json", raw_manifest)
     doc["replay"] = {"format": manifest["format"], "manifestUrl": "replay/staging/manifest.json",
@@ -814,12 +817,13 @@ def test_replay_resources_upload_before_document_and_marker(tmp_path, monkeypatc
     runtime = ["music-data/" + p.relative_to(out).as_posix() for p in paths]
     assert keys[-4:] == [runtime[-1], "music-data/music-data.json", "music-data/music-data.json.br", "music-data/build.json"]
     assert set(runtime[:-1]).issubset(keys[:-4])
-    assert {replay_key(doc, f"recommend/{name}") for name in ("ournotes_recommend.js", "ournotes_recommend_bg.wasm",
-                                                              "build.json")}.issubset(keys[:-4])
+    assert {replay_key(doc, f"recommend/{name}") for name in ("ournotes_recommend_wasm.js",
+                                                              "ournotes_recommend_wasm_bg.wasm",
+                                                              "build-info.json")}.issubset(keys[:-4])
     types = {k: mime for k, _, mime in s3.log}
-    assert types[replay_key(doc, "engine/ournotes_replay_bg.wasm")] == "application/wasm"
-    assert types[replay_key(doc, "recommend/ournotes_recommend_bg.wasm")] == "application/wasm"
-    assert types[replay_key(doc, "recommend/ournotes_recommend.js")] == "text/javascript"
+    assert types[replay_key(doc, "engine/ournotes_replay_wasm_bg.wasm")] == "application/wasm"
+    assert types[replay_key(doc, "recommend/ournotes_recommend_wasm_bg.wasm")] == "application/wasm"
+    assert types[replay_key(doc, "recommend/ournotes_recommend_wasm.js")] == "text/javascript"
     caches = {k: c for k, c, _ in s3.log}
     for path in paths:
         key = "music-data/" + path.relative_to(out).as_posix()
@@ -946,8 +950,8 @@ def test_replay_labels_are_checked_and_uploaded_before_manifest(tmp_path, monkey
         assert keys.index(replay_key(doc, "snap-labels.json")) < keys.index(replay_key(doc, "manifest.json"))
 
 
-@pytest.mark.parametrize("changed", ["bytes", "model", "escape", "absolute", "ids", "abi", "dirty", "recommend-bytes",
-                                     "recommend-model", "recommend-dirty", "recommend-format"])
+@pytest.mark.parametrize("changed", ["bytes", "model", "escape", "absolute", "ids", "abi", "module", "recommend-bytes",
+                                     "recommend-model", "recommend-commit", "recommend-files"])
 def test_replay_identity_failure_prevents_any_upload(tmp_path, monkeypatch, changed):
     s3 = FakeS3()
     out, _ = published_out(tmp_path, monkeypatch, s3)
@@ -965,27 +969,24 @@ def test_replay_identity_failure_prevents_any_upload(tmp_path, monkeypatch, chan
             manifest["charts"][0]["scoreId"] = -1
         elif changed == "abi":
             manifest["engine"]["requestFormat"] = "other"
-        elif changed == "dirty":
-            built = replay_path(out, doc, "engine/build.json")
-            data = json.loads(built.read_bytes())
-            data["workingTreeDirty"] = True
-            raw = json.dumps(data).encode()
-            built.write_bytes(raw)
-            manifest["engine"]["build"].update(sha256=music_data.sha256(raw), bytes=len(raw))
         elif changed == "recommend-bytes":
-            replay_path(out, doc, "recommend/ournotes_recommend_bg.wasm").write_bytes(b"\0asm\x01\0\0\0other")
+            replay_path(out, doc, "recommend/ournotes_recommend_wasm_bg.wasm").write_bytes(b"\0asm\x01\0\0\0other")
         elif changed == "recommend-model":
             manifest["recommendEngine"]["model"]["commit"] = "other"
-        elif changed in ("recommend-dirty", "recommend-format"):
-            built = replay_path(out, doc, "recommend/build.json")
+        elif changed in ("module", "recommend-commit", "recommend-files"):
+            # a build-info.json that names another module, commit or file than the manifest's engine
+            key, prefix = ("engine", "engine") if changed == "module" else ("recommendEngine", "recommend")
+            built = replay_path(out, doc, f"{prefix}/build-info.json")
             data = json.loads(built.read_bytes())
-            if changed == "recommend-dirty":
-                data["workingTreeDirty"] = True
+            if changed == "module":
+                data["module"] = "recommend"
+            elif changed == "recommend-commit":
+                data["commit"] = "b" * 40
             else:
-                data["format"] = "ournotes.replay-engine/1"
+                data["files"]["web/ournotes_recommend_wasm_bg.wasm"] = "0" * 64
             raw = json.dumps(data).encode()
             built.write_bytes(raw)
-            manifest["recommendEngine"]["build"].update(sha256=music_data.sha256(raw), bytes=len(raw))
+            manifest[key]["build"].update(sha256=music_data.sha256(raw), bytes=len(raw))
         rewrite_replay_manifest(out, doc, manifest)
     with pytest.raises(SystemExit, match="replay resources changed after gates"):
         music_data.cmd_publish(str(out))
@@ -996,7 +997,7 @@ def test_replay_read_back_failure_stops_before_runtime_pointer(tmp_path, monkeyp
     s3 = FakeS3()
     out, _ = published_out(tmp_path, monkeypatch, s3)
     doc, _ = replay_out(out)
-    s3.corrupt = replay_key(doc, "engine/ournotes_replay_bg.wasm")
+    s3.corrupt = replay_key(doc, "engine/ournotes_replay_wasm_bg.wasm")
     monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
     monkeypatch.setattr(music_data.http_compression, "get_object", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
     with pytest.raises(SystemExit, match="does not serve what was uploaded"):
@@ -1017,7 +1018,7 @@ def test_parallel_payload_readbacks_finish_before_any_pointer(tmp_path, monkeypa
     payloads = {archive, *(p.relative_to(out).as_posix() for p in paths[:-1])}
     pointers = [paths[-1].relative_to(out).as_posix(), music_data.FILE, music_data.FILE_BR, music_data.MARKER]
     if corrupt:
-        key = archive if corrupt == "archive" else replay_key(doc, "engine/ournotes_replay_bg.wasm").removeprefix("music-data/")
+        key = archive if corrupt == "archive" else replay_key(doc, "engine/ournotes_replay_wasm_bg.wasm").removeprefix("music-data/")
         s3.corrupt = "music-data/" + key
         monkeypatch.setattr(music_data, "get", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
         monkeypatch.setattr(music_data.http_compression, "get_object", lambda *a, **kw: (_ for _ in ()).throw(music_data.urllib.error.URLError("offline")))
@@ -1046,49 +1047,27 @@ def test_parallel_payload_readbacks_finish_before_any_pointer(tmp_path, monkeypa
         assert [key for key, _, _ in s3.log][-len(pointers):] == ["music-data/" + key for key in pointers]
 
 
-@pytest.mark.parametrize("change", ["wrong-head", "untracked-source", "changed-during-build", None])
-def test_engine_build_checks_pinned_source_before_and_after_compiling(tmp_path, monkeypatch, change):
-    source, out = tmp_path / "source", tmp_path / "out"
-    source.mkdir()
-    out.mkdir()
-    monkeypatch.setenv("MUSIC_DATA_DECK_SOURCE", str(source))
-    pinned = "a" * 40
-    monkeypatch.setattr(music_data, "deck_commit", lambda: pinned)
-    checks = []
-    builds = []
-    def output(cmd, **kw):
-        if "rev-parse" in cmd:
-            return ("b" * 40 if change == "wrong-head" else pinned) + "\n"
-        checks.append(cmd)
-        return "?? src/untracked.rs\n" if change == "untracked-source" or (
-            change == "changed-during-build" and len(checks) == 2) else ""
-    def run(cmd, **kw):
-        builds.append(cmd)
-        if cmd[0] == "wasm-bindgen":
-            engine, name = Path(cmd[cmd.index("--out-dir") + 1]), cmd[cmd.index("--out-name") + 1]
-            (engine / f"{name}.js").write_bytes(b"js " + name.encode())
-            (engine / f"{name}_bg.wasm").write_bytes(b"wasm " + name.encode())
-    monkeypatch.setattr(music_data.subprocess, "check_output", output)
-    monkeypatch.setattr(music_data.subprocess, "run", run)
+@pytest.mark.parametrize("change", [None, "sha", "missing"])
+def test_engines_are_the_release_packages_of_the_pinned_model(tmp_path, monkeypatch, change):
+    monkeypatch.setattr(music_data, "deck_package", lambda: ("0.0.2", "a" * 40))
+    packages = {f"ournotes-{module}-wasm-v0.0.2.tar.gz": f"package {module}".encode() for module in music_data.ENGINES}
+    sums = {name: music_data.sha256(raw) for name, raw in packages.items()}
+    if change == "sha":
+        sums["ournotes-recommend-wasm-v0.0.2.tar.gz"] = "0" * 64
+    elif change == "missing":
+        del sums["ournotes-recommend-wasm-v0.0.2.tar.gz"]
+    base = f"{music_data.DECK_RELEASES}/v0.0.2/"
+    def get(url, timeout=120):
+        assert url.startswith(base)
+        name = url.removeprefix(base)
+        if name == "SHA256SUMS":
+            return "".join(f"{digest}  {file}\n" for file, digest in sums.items()).encode()
+        return packages[name]
+    monkeypatch.setattr(music_data, "get", get)
     if change:
-        with pytest.raises(SystemExit, match="source is dirty or differs"):
-            music_data.build_replay_engine(out)
-        assert not (out / "replay-engine-build/build.json").exists()
-        assert not (out / "recommend-engine-build/build.json").exists()
-        assert len(builds) == (5 if change == "changed-during-build" else 0)
-    else:
-        replay, recommend = music_data.build_replay_engine(out)
-        assert all("wasm/replay" in cmd and "wasm/recommend" in cmd for cmd in checks)
-        assert [cmd[cmd.index("--manifest-path") + 1] for cmd in builds if cmd[0] == "cargo"][1:] == [
-            str(source / "wasm/replay/Cargo.toml"), str(source / "wasm/recommend/Cargo.toml")]
-        bindgen = [cmd for cmd in builds if cmd[0] == "wasm-bindgen"]
-        assert all(cmd[1:3] == ["--target", "web"] for cmd in bindgen)
-        assert [Path(cmd[-1]).name for cmd in bindgen] == ["ournotes_replay_wasm.wasm", "ournotes_recommend_wasm.wasm"]
-        for engine, name, build_format in ((replay, "ournotes_replay", "ournotes.replay-engine/1"),
-                                           (recommend, "ournotes_recommend", "ournotes.recommend-engine/1")):
-            identity = json.loads((engine / "build.json").read_bytes())
-            assert identity["format"] == build_format
-            assert identity["commit"] == pinned and identity["workingTreeDirty"] is False
-            assert identity["jsSha256"] == music_data.sha256(b"js " + name.encode())
-            assert identity["wasmSha256"] == music_data.sha256(b"wasm " + name.encode())
-        assert len(checks) == 2 and len(builds) == 5
+        with pytest.raises(SystemExit, match="SHA-256 differs" if change == "sha" else "publishes no"):
+            music_data.release_engines(tmp_path)
+        return
+    replay, recommend = music_data.release_engines(tmp_path)
+    assert (replay.name, recommend.name) == ("ournotes-replay-wasm-v0.0.2.tar.gz", "ournotes-recommend-wasm-v0.0.2.tar.gz")
+    assert replay.read_bytes() == packages[replay.name] and recommend.read_bytes() == packages[recommend.name]

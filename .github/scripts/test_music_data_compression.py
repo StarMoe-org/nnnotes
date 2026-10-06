@@ -181,9 +181,10 @@ def test_ui_reader_freezes_new_snapshot_from_marker_archive_and_rejects_changed_
     def resource(name, raw):
         blobs[name] = raw
         return {"url": name, "sha256": md.sha256(raw), "bytes": len(raw)}
-    js = resource("engine/replay.js", b"export default ()=>{}"); wasm = resource("engine/replay.wasm", b"wasm")
-    engine_build = resource("engine/build.json", json.dumps({"commit": model, "workingTreeDirty": False,
-        "jsSha256": js["sha256"], "wasmSha256": wasm["sha256"]}).encode())
+    js = resource("engine/ournotes_replay_wasm.js", b"export default ()=>{}")
+    wasm = resource("engine/ournotes_replay_wasm_bg.wasm", b"wasm")
+    engine_build = resource("engine/build-info.json", json.dumps({"commit": model, "kind": "wasm", "module": "replay",
+        "files": {"web/ournotes_replay_wasm.js": js["sha256"], "web/ournotes_replay_wasm_bg.wasm": wasm["sha256"]}}).encode())
     deck = resource("deck-data.json", json.dumps({"provenance": provenance}).encode())
     labels = {"format": "nnnotes.replay-labels/1", "region": "tw", "masterVersion": source["masterVersion"],
         "tables": {name: {**table, "rows": []} for name, table in tables.items()}}
@@ -266,8 +267,9 @@ def test_reencoding_changes_all_json_transport_and_preserves_wasm_js_and_every_d
     report = reencode.reencode(tmp_path / "encoding")
     assert report["encodedBytes"] < report["decodedBytes"]
     assert {"snap-labels.json", "deck-data.json", "manifest.json", "music-data.json", "build.json"} <= {Path(item["key"]).name for item in report["objects"]}
-    assert any(item["key"].endswith("/recommend/build.json") for item in report["objects"])
-    assert {Path(key).name for key in report["unchangedArtifacts"]} >= {"ournotes_recommend.js", "ournotes_recommend_bg.wasm"}
+    assert any(item["key"].endswith("/recommend/build-info.json") for item in report["objects"])
+    assert {Path(key).name for key in report["unchangedArtifacts"]} >= {"ournotes_recommend_wasm.js",
+                                                                       "ournotes_recommend_wasm_bg.wasm"}
     for full, raw in before.items():
         if full.endswith(".json"):
             assert s3.headers[full]["ContentEncoding"] == "gzip"
