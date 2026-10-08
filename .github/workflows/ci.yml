@@ -42,10 +42,8 @@ jobs:
         run: python -m nnnotes --help
       - name: Test
         run: python -m pytest
-      - name: Story and catalog workflow tests
-        run: python -m pytest -q .github/scripts/test_catalog_workflow.py .github/scripts/test_jp_workflow.py .github/scripts/test_story_workflow.py
-      - name: Recognition gallery workflow tests
-        run: python -m pytest -q .github/scripts/test_recognition.py
+      - name: Workflow tests
+        run: python -m pytest -q .github/scripts
 
   goldens:
     # The golden records of the stages (tests/golden/*.json) were made with these library versions; with the same
