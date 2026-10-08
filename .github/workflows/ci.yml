@@ -42,7 +42,19 @@ jobs:
         run: python -m nnnotes --help
       - name: Test
         run: python -m pytest
+      - uses: actions/setup-node@v7
+        if: matrix.python-version == '3.13'
+        with:
+          node-version: "22"
+      - name: Chart data page
+        if: matrix.python-version == '3.13'
+        env:
+          PLAYER_REPOSITORY: ${{ vars.MUSIC_DATA_PLAYER_REPOSITORY || 'empty-sekai/ournotes-player' }}
+          PLAYER_REF: ${{ vars.MUSIC_DATA_PLAYER_REF }}
+        run: .github/scripts/songs_page.sh "$RUNNER_TEMP/music-data-player"
       - name: Workflow tests
+        env:
+          MUSIC_DATA_PAGE: ${{ matrix.python-version == '3.13' && format('{0}/music-data-player/examples/songs', runner.temp) || '' }}
         run: python -m pytest -q .github/scripts
 
   goldens:
