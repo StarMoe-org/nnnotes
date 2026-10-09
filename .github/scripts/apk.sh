@@ -10,8 +10,8 @@ if [ -z "${PLAYFETCH_CREDENTIALS_JSON:-}" ]; then
   exit 1
 fi
 bin="$RUNNER_TEMP/playfetch"
-curl -fsSL -o "$bin" "https://github.com/Exmeaning/playfetch/releases/download/$PLAYFETCH_VERSION/playfetch-$PLAYFETCH_VERSION-linux-amd64"
-curl -fsSL -o "$RUNNER_TEMP/SHA256SUMS" "https://github.com/Exmeaning/playfetch/releases/download/$PLAYFETCH_VERSION/SHA256SUMS"
+curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors -o "$bin" "https://github.com/Exmeaning/playfetch/releases/download/$PLAYFETCH_VERSION/playfetch-$PLAYFETCH_VERSION-linux-amd64"
+curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors -o "$RUNNER_TEMP/SHA256SUMS" "https://github.com/Exmeaning/playfetch/releases/download/$PLAYFETCH_VERSION/SHA256SUMS"
 (cd "$RUNNER_TEMP" && grep " playfetch-$PLAYFETCH_VERSION-linux-amd64\$" SHA256SUMS | sed "s| playfetch-$PLAYFETCH_VERSION-linux-amd64| playfetch|" | sha256sum -c -)
 chmod 755 "$bin"
 export PLAYFETCH_CREDENTIALS="$RUNNER_TEMP/playfetch-credentials.json"
