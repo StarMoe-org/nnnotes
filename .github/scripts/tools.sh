@@ -6,7 +6,7 @@ version=r2117
 digest=2f98c77f756079f63fbd119939067f1ed461d77e70993bc4cc372736d859c84a
 mkdir -p "$dir"
 if [ ! -x "$dir/vgmstream-cli" ]; then
-  curl -fsSL -o "$dir/vgmstream.zip" "https://github.com/vgmstream/vgmstream/releases/download/$version/vgmstream-linux.zip"
+  curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors -o "$dir/vgmstream.zip" "https://github.com/vgmstream/vgmstream/releases/download/$version/vgmstream-linux.zip"
   echo "$digest  $dir/vgmstream.zip" | sha256sum -c -
   unzip -q -o "$dir/vgmstream.zip" vgmstream-cli -d "$dir"
   rm "$dir/vgmstream.zip"
