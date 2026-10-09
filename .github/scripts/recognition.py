@@ -24,7 +24,9 @@ in the story site's bucket, content-addressed (`assets/<sha256>.<ext>`); one sma
 
 Bucket: $STORY_S3_ENDPOINT, $STORY_S3_BUCKET, $RECOGNITION_S3_PREFIX (a key prefix, may be empty), credentials
 $STORY_S3_ACCESS_KEY / $STORY_S3_SECRET_KEY (publish and runtime only). Sources: $MASTERDATA_BASE_URL (decoded master
-data, index.json with every file's SHA-256), $RECOGNITION_REGIONS, $RECOGNITION_ASSET_API (the asset service).
+data, index.json with every file's SHA-256), $RECOGNITION_REGIONS, $RECOGNITION_ASSET_API (the asset service). plan and
+build read the catalog once the asset service has exported every region's master version, waiting up to
+$RECOGNITION_EXPORT_WAIT seconds (3600) and checking every $RECOGNITION_EXPORT_POLL seconds (60).
 """
 from __future__ import annotations
 
@@ -73,6 +75,8 @@ KINDS = {"member": {"table": "MasterMemberCard", "directory": "MemberCard", "lab
          "snap": {"table": "MasterSupportCard", "directory": "SupportCard", "label": "snap_thumbnail", "file": "snap_thumbnail.webp",
                   "levels": "MasterSupportCardLevel", "limits": "MasterSupportCardRank"}}
 GROWTH_TABLES = tuple(info[key] for info in KINDS.values() for key in ("levels", "limits"))
+# Asset service release states whose files are published (/versions/current_version.json).
+EXPORT_STATES = ("succeeded", "partial")
 RUNTIME_ROLES = ("glue", "module", "wasm")
 STAGES = ("encoders", "fields", "ranks")
 HEX64 = re.compile(r"[a-f0-9]{64}")
@@ -414,6 +418,38 @@ def master_sources(names: list[str]) -> list[dict]:
     return sources
 
 
+def export_lag(api: str, sources: list[dict]) -> list[str]:
+    """The regions whose latest asset service release (/versions/current_version.json) is not at the master version the
+    catalog was read from: their new cards' artwork is not published yet."""
+    status = json.loads(fetch(f"{api}/versions/current_version.json").body)
+    releases = {entry.get("metadata_region"): entry for entry in (status.get("regions") or {}).values()
+                if isinstance(entry, dict)}
+    lag = []
+    for source in sources:
+        release = releases.get(source["region"]) or {}
+        if release.get("master_version") != source["masterVersion"] or release.get("state") not in EXPORT_STATES:
+            lag.append(f"{source['region']} (master {source['masterVersion']}, asset release "
+                       f"{release.get('master_version')} {release.get('state')})")
+    return lag
+
+
+def exported_sources(names: list[str]) -> list[dict]:
+    """master_sources once the asset service has exported each region's master version. Master data moves first, so
+    both are read again every $RECOGNITION_EXPORT_POLL seconds for up to $RECOGNITION_EXPORT_WAIT seconds."""
+    api = env("RECOGNITION_ASSET_API", "https://assets.bdon.moe").rstrip("/")
+    poll = max(1, int(env("RECOGNITION_EXPORT_POLL", "60")))
+    attempts = max(0, int(env("RECOGNITION_EXPORT_WAIT", "3600"))) // poll + 1
+    for attempt in range(attempts):
+        sources = master_sources(names)
+        lag = export_lag(api, sources)
+        if not lag:
+            return sources
+        if attempt + 1 < attempts:
+            print(f"waiting for the asset service to export {', '.join(lag)}", flush=True)
+            time.sleep(poll)
+    raise Failure(f"the asset service has not exported {', '.join(lag)}; the pointer stays on the published bundle")
+
+
 def catalog(sources: list[dict]) -> tuple[list[dict], list[str]]:
     """The union of every region's cards; a card's identity and level limit are the first region's (in
     RECOGNITION_REGIONS order)."""
@@ -526,7 +562,7 @@ def superset_problem(state: dict | None, keys: set[str]) -> str | None:
 # ---------------------------------------------------------------- plan
 def cmd_plan() -> None:
     spec = runtime_spec()
-    sources = master_sources(regions())
+    sources = exported_sources(regions())
     cards, warnings = catalog(sources)
     arts = resolve_art(cards)
     inputs = inputs_identity(spec, cards, arts)
@@ -732,7 +768,7 @@ def cmd_build(out: Path, models_dir: Path, runtime_dir: Path | None) -> None:
     models = {name: pinned_file(models_dir, name, spec["files"][name]) for name in builder_inputs(spec)}
     site = out / "site"
     (site / "assets").mkdir(parents=True)
-    sources = master_sources(regions())
+    sources = exported_sources(regions())
     cards, warnings = catalog(sources)
     arts = resolve_art(cards)
     state = published_state()

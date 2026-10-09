@@ -62,6 +62,7 @@ class World:
         self.store = {}
         self.puts = []
         self.corrupt_downloads = set()
+        self.exports = {}  # region: (master version, state) of its asset release; default: exported
         self.runtime = {}
         spec = json.loads(r.RUNTIME_SPEC.read_text(encoding="utf-8"))
         for index, (name, record) in enumerate(spec["files"].items()):
@@ -111,6 +112,12 @@ class World:
                 for table in self.tables(region):
                     if url == f"{MASTER}/{region.split('-')[0]}/master/{table}.json":
                         return respond(self.table(region, table))
+        if url == f"{ASSETS}/versions/current_version.json":
+            regions = {}
+            for region in self.masters:
+                version, state = self.exports.get(region, (f"v-{region}", "succeeded"))
+                regions[region.split("-")[0]] = {"metadata_region": region, "master_version": version, "state": state}
+            return respond(json.dumps({"schema_version": 1, "regions": regions}).encode())
         if url.startswith(ASSETS + "/files/"):
             name = url.removeprefix(ASSETS + "/files/")
             kind, asset = ("member" if name[0] == "m" else "snap"), int(name[1:])
@@ -152,7 +159,7 @@ def world(tmp_path, monkeypatch):
                         "RECOGNITION_REGIONS": "hk-tw-mo jp", "RECOGNITION_ASSET_API": ASSETS,
                         "MASTERDATA_BASE_URL": MASTER, "GITHUB_REPOSITORY": "example/nnnotes"}.items():
         monkeypatch.setenv(name, value)
-    for name in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "FORCE"):
+    for name in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "FORCE", "RECOGNITION_EXPORT_WAIT", "RECOGNITION_EXPORT_POLL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(r, "RUNTIME_SPEC", w.spec_path)
     monkeypatch.setattr(r, "fetch", w.fetch)
@@ -454,6 +461,32 @@ def test_plan_builds_only_when_inputs_change(world, monkeypatch):
     world.art[("snap", 1)] = webp(512, 288, 999)
     r.cmd_plan()
     assert outputs["build"] == "true"
+
+
+def test_plan_waits_for_the_asset_release_of_the_master_version(world, monkeypatch):
+    outputs, sleeps = {}, []
+    monkeypatch.setattr(r, "output", outputs.__setitem__)
+    world.exports["jp"] = ("v-previous", "succeeded")
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        world.exports.pop("jp")
+    monkeypatch.setattr(r.time, "sleep", sleep)
+    r.cmd_plan()
+    assert sleeps == [60]
+    assert outputs == {"build": "true", "runtime": "false"}
+
+
+@pytest.mark.parametrize("export", [("v-previous", "succeeded"), ("v-hk-tw-mo", "running")])
+def test_plan_stops_when_the_asset_release_stays_behind(world, monkeypatch, export):
+    sleeps = []
+    monkeypatch.setattr(r.time, "sleep", sleeps.append)
+    monkeypatch.setenv("RECOGNITION_EXPORT_WAIT", "120")
+    world.exports["hk-tw-mo"] = export
+    with pytest.raises(r.Failure, match="has not exported hk-tw-mo"):
+        r.cmd_plan()
+    assert sleeps == [60, 60]
+    assert not world.puts
 
 
 def test_a_threshold_or_level_limit_change_is_a_new_input(world, monkeypatch):

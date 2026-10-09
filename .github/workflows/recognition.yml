@@ -9,9 +9,10 @@ name: Recognition gallery
 # them all, and last the small pointer recognition/current.json that names the bundle. Nothing is deleted or
 # overwritten; a catalog that lacks a published card, or any artwork that fails its check, leaves the pointer where it is.
 #
-# Triggers: moenotes-masterdata-sync's repository_dispatch `masterdata-updated`, a daily schedule in case a dispatch was
-# missed, and workflow_dispatch (force: build although the inputs are unchanged; dry_run). Publishing switch: the
-# repository variable RECOGNITION_PUBLISH (unset: every run is a dry run). docs: .github/RECOGNITION.md
+# Triggers: moenotes-masterdata-sync's repository_dispatch `masterdata-updated`, a schedule every six hours in case a
+# dispatch was missed, and workflow_dispatch (force: build although the inputs are unchanged; dry_run). Master data moves
+# before the asset service exports its artwork: the plan job waits for that export. Publishing switch: the repository
+# variable RECOGNITION_PUBLISH (unset: every run is a dry run). docs: .github/RECOGNITION.md
 
 on:
   repository_dispatch:
@@ -27,7 +28,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "53 3 * * *"
+    - cron: "53 */6 * * *"
 
 permissions:
   contents: read
@@ -52,7 +53,8 @@ env:
 jobs:
   plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # up to an hour waiting for the asset service to export a new master version
+    timeout-minutes: 75
     outputs:
       build: ${{ steps.plan.outputs.build }}
       runtime: ${{ steps.plan.outputs.runtime }}
@@ -130,6 +132,8 @@ jobs:
           name: recognition-encoder-models
           path: ${{ env.WORK }}/models
       - name: Build
+        env:
+          RECOGNITION_EXPORT_WAIT: "0"   # the plan job waited; a master version newer than its catalog stops here
         run: python .github/scripts/recognition.py build "$WORK/out" --models "$WORK/models"
       - name: Publish
         # Read-only preflight first; a dry run (the dry_run input, or RECOGNITION_PUBLISH off) stops after it.
