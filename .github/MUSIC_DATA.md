@@ -98,10 +98,14 @@ extend the existing linear plain-skill UI domain or derive source rank threshold
      `ournotes-sim` package `rust/Cargo.lock` pins, each checked against the release's `SHA256SUMS`; nnnotes takes
      their web packages after checking each `build-info.json` (module, commit, file SHA-256) against its deck model;
    - `nnnotes music-data --decoded-master --jackets jackets --replay-dir replay --replay-engine ... --recommend-engine
-     ... --stats-cache $MUSIC_DATA_STATS_CACHE -o music-data.json`: the deck statistics of the last build of the
-     region come back from `actions/cache` (derived numbers the file publishes, no game files), and only the charts
-     whose deck model sources (`provenance.deck.sourceSha256`), options, master tables or chart changed are measured
-     again; the summary counts both. The master data as decoded (no
+     ... --stats-cache $MUSIC_DATA_STATS_CACHE -o music-data.json`: restores the region's native measurement
+     cache from `actions/cache`. It reuses compatible compiled programs, expectations and completed runs across
+     inputs, including unchanged skill shapes after a catalog change. The complete current master and charts
+     still enter the model on every build; current headers and chart documents are assembled anew. Records are
+     isolated by cache schema and model source SHA-256, validated on read, and saved atomically after each result.
+     Interrupted builds retain completed records. There is no automatic garbage collection or migration of the
+     former whole-chart Python cache. Summary counters are native cache hits, successful computations, writes
+     and invalid records, not numbers of charts. The master data as decoded (no
      master key), `provenance.master` the manifest's version and SHA-256 of the files as served; the charts, cue
      sheets and jackets from the TW catalog, downloaded afresh on every run (never `actions/cache`: nnnotes keeps a
      downloaded catalog for good, and the cache holds decrypted game files);
@@ -169,12 +173,12 @@ Every one must pass, else nothing is published. Warnings go to the job summary a
 | Gate | Checks |
 |---|---|
 | (build) | nnnotes' own checks: every table, chart and cue sheet read, every chart measured, the deck statistics cross-checked against the chart facts and the master data (the command writes no file otherwise) |
-| `schema` | the file against `docs/schema/music-data.schema.json` of the checkout (JSON Schema 2020-12) |
+| `schema` | the file against `docs/schema/music-data.schema.json` of the checkout (JSON Schema 2020-12), requiring `nnnotes.music-data/2` and `ournotes-deck.chart-stats/3` statistics |
 | `provenance` | `format`; `region` `tw`; `master.source` `api`; `master.version` equal to the snapshot's and its `MasterManifest.json`'s; every table's SHA-256 the manifest's, every decoded table read the one `index.json` lists; the song tables and the deck model's present; `deck.commit` the one `rust/Cargo.lock` pins; `exporter.version` the installed nnnotes; an APK version; a catalog SHA-256 (warning: the APK is another client version than the snapshot's) |
 | `counts` | no fewer songs and charts than the published file (warning: ids no longer in it) |
-| `deck` | deck statistics on every chart: kinds, a positive power, events and positions matching the chart, seeds unless unplayable (a warning): the one seed 0 on a chart without a luck range, else two or more different seeds, the same on every luck chart (their number is the file's, not fixed), `weights[kind][position]` numbers, every seed range's `rankBonus` = trunc(`rangeScore` x `rankBonusPercent` / 100) and its `luckPoints` an int, every check deck within its bound |
-| `scenarios` | the play scenario fields: `offSeeds` exactly one entry (seed 0, score, weights, check within its bound), every range's `rankBonusPercents` five ints (the first `rankBonusPercent`), every seed's `scorePerfect`, `rangeWeights` (`[kind][position][range]`) and `rankCheck` (within its bound), every seed range's `rangeScorePerfect` (warnings, none in TW: a null `rangeWeights`, a null kind in it or in `offSeeds`' weights) |
-| `aptitude` | the Gekisou skill aptitude (every shape alone on a chart). `deck.model.gekisouAptitude` a text; `deck.gekisouAptitude`: every key, `plainKind` the page's plain kind, a `host` text, the `seedRule` (a deterministic test, increasing batches, the targets, the cross seeds), `shapes` numbered 0, 1, 2, ... (source `member` or `support`, mission 1 to 4, `bandCondition` a support skill's alone and exactly when an effect has condition 5000, effect rows with every key and their condition groups, condition 5000 without targets, skills with a level and, with a band condition alone, member targets and bands). Every chart's `deck.gekisouAptitude`: null exactly when the chart is unplayable with Gekisou on, has no Gekisou range or there is no shape; else `factors` one per range (counts; no Just or Perfect notes outside a Just range; `lotteries` `[0, 0]` outside a luck range, else the mean of `deck.seeds`' `lotResults`) and `variants` one per shape of the chart's missions (or mission 4) in shape order, a band condition shape's `bandMatch` true then false: every `[mean, se]` two finite numbers with se >= 0 (every se 0 when deterministic), ranges one per range, `tail` = `score` less the ranges' `rangeScore` and `rankBonus` (allowing 0.0005 per rounded term plus 1e-6), deterministic point deltas integers and `tailPerfect` checked against the baseline Perfect range bonuses, 1 seed when deterministic else a batch of the seed rule, with `seTargetMet` true for both exported score channels, `crossSeeds` min(seeds, the rule's), `weights` one per position and `rangeWeights` per position and range where the plain kind and `deck.seeds[0].rangeWeights` are, else null, the `check` on `deck.seeds[0]`'s seed, a rank per range (1 where the ranks are not linear), a plain kind value or null per position, within its bound (fails when any variant misses the standard error target, including at the sample cap) |
+| `deck` | native kinds, positive power, events and positions matching chart facts; explicit nominal `expectation` unless unplayable; replay seeds equal `[0]` without luck or the published prefix shared by luck charts; finite `[center, outward radius]` estimates, valid dimensions and deterministic counters; lottery estimates enclose zero outside luck ranges; complete expectation check decks within their bounds |
+| `scenarios` | exactly one deterministic Free Live `offSeeds` entry (seed 0, scalar score/weights and bounded check); five integer rank percentages per range; explicit best/Perfect scores and `rankBonusPerfect`; rank-weight dimensions and rank checks match the supported linear domain; nulls warn about unavailable rank or Free Live weights rather than becoming zero gains |
+| `aptitude` | complete model/header descriptions and exact independent nominal probability `law`; continuous shape ids, valid sources/missions, complete effect/condition structure and skill/level/band references; factors and ordered variants cover every applicable shape, with both band results where required; finite outward intervals, deterministic integer increments, per-position cross terms, both total/tail interval identities, explicit Perfect bonuses and bounded nominal checks; confirmed-rank conditions disable linear rank cross terms and require rank-1 checks |
 | `finite` | no NaN or infinity (warning: one inside master data rows, `songs[].master`, which the format writes as `1e999`) |
 | `references` | texts in every language of `languages` (names and titles not empty); unique ids; songs sorted; the songs' bands, vocal characters and tags in the file; a band or a band name; a jacket, and its file in `jackets/`; a BGM cue; score ranks; charts in difficulty order, score ids unique (warnings: a title without a `zh-Hant` text, a music category on no tab, a character of no band) |
 | `sourceRanks` | every exported song ID and each raw solo `requiredScore` / room `battleRequiredScore` exactly matches downloaded `MasterLiveMusic` + `MasterLiveScoreRank`; no derived `requiredPower` is treated as a source field |
@@ -195,22 +199,26 @@ python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .gith
 ```
 
 with, optionally, `MUSIC_DATA_SCHEMA` (a schema file when the checkout has none), `MUSIC_DATA_PAGE` (an
-`examples/songs` directory: the smoke test), `MUSIC_DATA_SAMPLE` (a real file with the play scenario fields: its
-content gates pass; one made before the ranges' `luckPoints` and the aptitude: the deck and aptitude gates stop it
-on those alone) and
-`MUSIC_DATA_OLD_SAMPLE` (one without the play scenario fields: the scenario gate stops it).
+`examples/songs` directory for the smoke test), `MUSIC_DATA_SAMPLE` (a current `/2` file with nominal expectations)
+and `MUSIC_DATA_OLD_SAMPLE` (an incompatible file that the required scenario contract rejects).
+
+The deck and aptitude gates reuse the exporter's interval validators. An Estimate is a finite center and
+nonnegative outward radius, not a sampled mean and standard error. A radius encloses numerical error; a check's
+separate scalar bound covers the formula's approximation and integer-floor error. Expected rank bonuses are
+measured explicitly: truncating the expected range score is not equivalent to taking the expectation of the
+truncated score. There is no sample-cap or standard-error convergence gate in the nominal format.
 
 ### Aptitude page smoke
 
-With the aptitude API (ournotes-player PR #11, `1522c24`), the same Node smoke also checks shape/skill/band
-lookups, chart variants, all five battle scenarios, Free Live exclusion, finite gains, raw standard errors,
-missing cross terms and the absence of standard errors for transformed or combined figures. Removing aptitude
-must not change the default chart figures: default ranking still has no card Gekisou skills.
+The same Node smoke checks the page's shape/skill/band lookups, applicable chart variants, five battle scenarios,
+Free Live exclusion, finite gains, raw numerical radii, missing cross terms and the absence of an assigned
+uncertainty for transformed or combined figures without a supported bound. Removing aptitude must not change the
+default chart figures: default ranking still has no card Gekisou skills.
 
-Only deterministic variants are reconstructed against their individual `check` seed, using positional cards and
-`masterSkillFactor` for the game's float32 conversion. Stochastic means are never used to reconstruct a check.
-Older pinned page modules explicitly report `API unavailable (skipped)`; moving `MUSIC_DATA_PLAYER_REF` remains a
-separate rollout decision. No browser or page build is needed.
+Every nominal variant can be reconstructed against its expectation check, using positional ordinary cards and
+`masterSkillFactor` for the game's float32 conversion. Replay seeds are not part of that reconstruction. The
+page's API must support the current expectation format; an unavailable aptitude API fails publication. Pin a
+compatible `MUSIC_DATA_PLAYER_REF` with the format upgrade. No browser or page build is needed for the Node smoke.
 
 ## Settings
 
@@ -222,7 +230,7 @@ Repository variables:
 
 | Variable | Default | |
 |---|---|---|
-| `MUSIC_DATA_PLAYER_REF` | none: **required** | the ournotes-player commit whose chart data page reads this file (the page with the play scenarios); a run stops before building without it |
+| `MUSIC_DATA_PLAYER_REF` | `946f25c1b50ca1cbb8209ca766056a1a2f6c3aca` | the ournotes-player commit supporting nominal chart-stats/3; custom overrides must pass the same format smoke test before building |
 | `MUSIC_DATA_PUBLISH` | none: off | `true`: upload; anything else: every run is a dry run |
 | `MUSIC_DATA_PLAYER_REPOSITORY` | `empty-sekai/ournotes-player` | |
 | `MUSIC_DATA_REGIONS` | `hk-tw-mo jp` | regions checked independently by dispatch/schedule |
@@ -232,14 +240,24 @@ Repository variables:
 
 ## Before the first run
 
-- **nnnotes.** The workflow runs this fork's nnnotes. It needs upstream's `music-data` command with the play
-  scenarios (MetaSekaiLab/nnnotes `a03591e`) and `--decoded-master` (MetaSekaiLab/nnnotes#6, `12df2a6`): sync the
-  fork with upstream first. Until then `plan` stops naming what is missing. The deck and aptitude gates also need
-  the ranges' `luckPoints` and the Gekisou skill aptitude, which come with nnnotes' and ournotes-deck's Gekisou skill
-  changes: until the fork has them every build stops there.
-- **The page.** Set `MUSIC_DATA_PLAYER_REF` to the ournotes-player commit of the chart data page that reads the play
-  scenario fields, once that page is merged.
-- **Publishing.** Set `MUSIC_DATA_PUBLISH` to `true` last, when dry runs pass and the published format is final.
+- **Native model and engines.** The native program cache is supplied by
+  [ournotes-deck#44](https://github.com/empty-sekai/ournotes-deck/pull/44). The exact source revision in
+  `rust/Cargo.toml` and `rust/Cargo.lock` must also be available as a model release with both replay and
+  recommendation WASM packages. Building this source pin locally is supported before that release exists;
+  production publication still requires matching engine commit and source identities. If the release uses a
+  different commit after merging, update the Cargo revision and lockfile package version and rebuild the extension.
+  The publisher selects `v<version>` from that package version, so creating a new tag alone is insufficient.
+  Older engines, including an older release with the
+  same package version, must not be substituted or admitted by weakening the identity gate.
+- **Consumers.** Deploy readers for `nnnotes.music-data/2` and `ournotes-deck.chart-stats/3` before publishing new
+  data. The default `MUSIC_DATA_PLAYER_REF` already selects the nominal-expectation consumer in
+  [ournotes-player#18](https://github.com/empty-sekai/ournotes-player/pull/18); an explicit repository variable
+  overrides that default and must pass the same smoke test. The corresponding site changes are
+  [moenotes#7](https://github.com/nichinichisou0609/moenotes/pull/7), stacked on the deck-goal repair in
+  [moenotes#6](https://github.com/nichinichisou0609/moenotes/pull/6).
+- **Producer and publication.** This checkout publishes only the new nominal format and starts a fresh native
+  cache namespace; it does not migrate old Python cache records. Run the normal or prebuilt publication gates
+  with the matching engines and consumers. Set `MUSIC_DATA_PUBLISH` to `true` after the dry run passes.
 
 ## Notes
 

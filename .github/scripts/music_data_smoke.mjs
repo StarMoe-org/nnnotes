@@ -22,6 +22,7 @@ const data = JSON.parse(readFileSync(file, "utf8"));
 const problems = [];
 const problem = (m) => problems.push(m);
 const finite = (v) => typeof v === "number" && Number.isFinite(v);
+if (data.format !== "nnnotes.music-data/2") problem(`unsupported music data format: ${data.format}`);
 
 const charts = (data.songs || []).flatMap((s) => (s.charts || []).map((c) => ({ song: s, chart: c })));
 const rows = catalog.chartRows(data);
@@ -35,9 +36,9 @@ const computable = (deck, scenario) => {
   if (!deck) return false;
   const has = (s) => s && Array.isArray((s.weights || [])[kind]);
   if (scenario && scenario.mode === "free") return (deck.offSeeds || []).length > 0 && deck.offSeeds.every(has);
-  if (deck.unplayable || !(deck.seeds || []).length) return false;
+  if (deck.unplayable || !deck.expectation) return false;
   const rank1 = !scenario || ((scenario.ranks || []).every((r) => r === 1) && (scenario.just ?? 1) >= 1);
-  return deck.seeds.every((s) => has(s) && (rank1 || Array.isArray((s.rangeWeights || [])[kind])));
+  return has(deck.expectation) && (rank1 || Array.isArray((deck.expectation.rangeWeights || [])[kind]));
 };
 const has = ranking.scenarioData(data);
 for (const k of ["free", "ranks", "just"]) if (!has[k]) problem(`scenarioData: no data for the ${k} scenario`);
@@ -85,13 +86,14 @@ for (const [name, scenario] of SCENARIOS) {
 }
 catalog.histogram(rows, (r) => r.level);
 
-// Aptitude is a separate view, never folded into the default song ranking. Older pinned pages may lack this API;
-// report that explicitly until PLAYER_REF is deliberately moved to a page with the aptitude UI.
+// Aptitude is a separate view, never folded into the default song ranking. The pinned consumer must support the
+// same nominal expectation format as the artifact being published.
 let aptitudeFigures = 0;
-const aptitudeApi = ["aptitudeShapes", "chartVariants", "aptitudeFigures", "aptitudeRate", "aptitudeSe",
+const aptitudeApi = ["aptitudeShapes", "chartVariants", "aptitudeFigures", "aptitudeRate", "aptitudeSe", "aptitudeRadius",
   "masterSkillFactor"].every((k) => typeof ranking[k] === "function")
   && ["gekisouSkill", "shapeSkills", "shapeBands"].every((k) => typeof catalog[k] === "function");
 const near = (a, b) => finite(a) && finite(b) && Math.abs(a - b) <= 1e-8 * Math.max(1, Math.abs(a), Math.abs(b));
+if (data.deck?.gekisouAptitude && !aptitudeApi) problem("aptitude API unavailable in the pinned page");
 if (aptitudeApi && data.deck?.gekisouAptitude) {
   const shapes = ranking.aptitudeShapes(data);
   if (shapes.size !== data.deck.gekisouAptitude.shapes.length) problem("aptitudeShapes: missing shapes");
@@ -125,9 +127,14 @@ if (aptitudeApi && data.deck?.gekisouAptitude) {
     for (const variant of variants) {
       for (const [name, scenario] of SCENARIOS) {
         const tag = `aptitude chart ${chart.scoreId} shape ${variant.shape}, ${name}`;
-        const f = ranking.aptitudeFigures(variant, d.ranges, power, scenario);
+        const f = ranking.aptitudeFigures(variant, d.ranges, power, scenario, true);
         if (scenario?.mode === "free") {
           if (f !== null) problem(`${tag}: Free Live has aptitude`);
+          continue;
+        }
+        const rank1 = (scenario?.ranks || []).slice(0, d.ranges.length).every((r) => r === 1);
+        if (!rank1 && variant.rangeWeights === null) {
+          if (f !== null) problem(`${tag}: a nonlinear variant was extrapolated to another rank`);
           continue;
         }
         aptitudeFigures++;
@@ -139,28 +146,29 @@ if (aptitudeApi && data.deck?.gekisouAptitude) {
         if (!near(ranking.aptitudeRate(f, zero), f.base)) problem(`${tag}: no-skill rate`);
         const rate = ranking.aptitudeRate(f, SKILLS);
         if (f.weights === null ? rate !== null : !finite(rate)) problem(`${tag}: missing cross-term handling`);
-        if (ranking.aptitudeSe(f, SKILLS) !== null) problem(`${tag}: SE assigned without covariance`);
+        if (ranking.aptitudeSe(f, zero) !== null) problem(`${tag}: nominal uncertainty mislabeled as sampling SE`);
+        if (ranking.aptitudeRadius(f, SKILLS) !== null) problem(`${tag}: uncertainty assigned to unbounded cross terms`);
         if (scenario === null) {
           if (!near(f.base, variant.score[0] / power)
-            || !near(ranking.aptitudeSe(f, zero), variant.score[1] / power)) problem(`${tag}: raw mean/SE`);
-        } else if (ranking.aptitudeSe(f, zero) !== null) problem(`${tag}: transformed SE is not null`);
+            || !near(ranking.aptitudeRadius(f, zero), variant.score[1] / power)) problem(`${tag}: raw expectation/interval`);
+        } else if (ranking.aptitudeRadius(f, zero) !== null) problem(`${tag}: transformed uncertainty is not null`);
       }
-      // Only deterministic deltas describe the individual check seed. Never reconstruct a stochastic check
-      // from sampled means. Ordinary check cards are positional, unlike the UI's random-order expectation.
-      if (!variant.deterministic || kind === null) continue;
+      // Every nominal delta can reconstruct its expectation check. Ordinary check cards are positional,
+      // unlike the UI's random-order expectation. Replay seeds play no part in this calculation.
+      if (kind === null) continue;
       const c = variant.check;
-      const seed = d.seeds.find((s) => s.seed === c.seed);
       const sc = { mode: "battle", ranks: c.ranks, just: 1, great: 0 };
-      const base = ranking.scenarioSeed(seed, d.ranges, kind, sc);
-      const gain = ranking.aptitudeFigures(variant, d.ranges, power, sc);
+      const base = ranking.chartFigures(d, kind, power, sc);
+      const gain = ranking.aptitudeFigures(variant, d.ranges, power, sc, true);
       if (!base || !gain?.weights) continue;
-      const predicted = data.deck.model.checkPower * ((base.score / power) + gain.base
+      const predicted = data.deck.model.checkPower * (base.base + gain.base
         + c.deck.reduce((sum, card, k) => sum + (card ? ranking.masterSkillFactor(card[1])
           * (base.weights[k] + gain.weights[k]) : 0), 0));
       // Exported weight rounding adds a small reconstruction error on top of the engine's bound.
       const rounding = data.deck.model.checkPower * 1e-7 * (1 + d.ranges.length) * d.positions;
-      if (!finite(predicted) || Math.abs(predicted - c.exact) > c.bound + rounding) {
-        problem(`aptitude chart ${chart.scoreId} shape ${variant.shape}: deterministic check reconstruction`);
+      if (!finite(predicted) || !Array.isArray(c.expected) || !c.expected.every(finite)
+        || Math.abs(predicted - c.expected[0]) + c.expected[1] > c.bound + rounding) {
+        problem(`aptitude chart ${chart.scoreId} shape ${variant.shape}: nominal check reconstruction`);
       }
     }
   }
@@ -172,4 +180,4 @@ if (problems.length) {
   process.exit(1);
 }
 console.log(`page smoke test: ${rows.length} charts, ${SCENARIOS.length} scenarios, ${figures} chart figures; `
-  + `plain kind ${kind}, scenarios free/ranks/just; aptitude ${aptitudeApi ? aptitudeFigures + " figures" : "API unavailable (skipped)"}`);
+  + `plain kind ${kind}, scenarios free/ranks/just; aptitude ${aptitudeFigures} figures`);

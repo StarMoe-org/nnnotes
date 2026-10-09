@@ -29,18 +29,18 @@ env:
   # moenotes-masterdata-sync: decoded master data by region (index.json lists every file with its SHA-256).
   MASTERDATA_BASE_URL: ${{ vars.MASTERDATA_BASE_URL || 'https://metadata.bdon.moe' }}
   MASTERDATA_REGION: ${{ inputs.region }}
-  # The ournotes-player whose chart data page reads the file: its modules smoke-test every build. No default yet: the
-  # page with the play scenarios is not merged; a run stops before building until MUSIC_DATA_PLAYER_REF is set.
+  # This consumer reads nominal chart-stats/3. Explicit overrides must support the same format; the page's modules
+  # smoke-test the new format before master-data download and every completed artifact before publication.
   PLAYER_REPOSITORY: ${{ vars.MUSIC_DATA_PLAYER_REPOSITORY || 'empty-sekai/ournotes-player' }}
-  PLAYER_REF: ${{ vars.MUSIC_DATA_PLAYER_REF || '' }}
+  PLAYER_REF: ${{ vars.MUSIC_DATA_PLAYER_REF || '946f25c1b50ca1cbb8209ca766056a1a2f6c3aca' }}
   PLAYFETCH_VERSION: ${{ vars.PLAYFETCH_VERSION || 'v0.92' }}
   APK_PACKAGE: ${{ inputs.region == 'jp' && 'com.bushiroad.sirius' || vars.STORY_APK_PACKAGE || 'com.bilibili.sirius' }}
   PYTHON_VERSION: "3.13"
   PYTHONPATH: src
   WORK: ${{ github.workspace }}/music-data-work
-  # The deck statistics of every chart of the last build, under the SHA-256 of the model sources, options, master
-  # tables and chart they come from (nnnotes music-data --stats-cache): derived numbers the file publishes, no game
-  # files. A build measures only the charts whose inputs changed.
+  # Completed native programs, under the model source identity and compiled semantic inputs. A change to a
+  # chart, kind or shape only recomputes affected programs; current metadata and checks are assembled each run.
+  # This contains derived numeric results, with no original game files or migration from whole-chart caches.
   MUSIC_DATA_STATS_CACHE: ${{ github.workspace }}/music-data-work/stats-cache
   # Bundle keys come from secrets; catalog versions and CDN roots come from the saved master snapshot.
   NNNOTES_CATALOG_REGION: ${{ inputs.region == 'jp' && 'jp' || 'tw' }}
@@ -135,8 +135,8 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.MUSIC_DATA_STATS_CACHE }}
-          key: music-data-stats-${{ inputs.region }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: music-data-stats-${{ inputs.region }}-
+          key: music-data-native-v1-${{ inputs.region }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: music-data-native-v1-${{ inputs.region }}-
 
       - name: Build
         env:
@@ -152,13 +152,13 @@ jobs:
           python .github/scripts/music_data.py build "$WORK/out"
 
       - name: Keep the chart statistics for the next build
-        # also after a failed build: nnnotes writes each chart's statistics as soon as they are measured, and a later
-        # failure (a jacket the game API cannot serve) leaves them valid
+        # Each completed native computation is saved atomically. Keep those checkpoints after a later
+        # failure so the next run only computes missing units.
         if: always()
         uses: actions/cache/save@v6
         with:
           path: ${{ env.MUSIC_DATA_STATS_CACHE }}
-          key: music-data-stats-${{ inputs.region }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: music-data-native-v1-${{ inputs.region }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Gates
         id: gates
