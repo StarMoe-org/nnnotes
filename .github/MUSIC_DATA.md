@@ -230,7 +230,7 @@ Repository variables:
 
 | Variable | Default | |
 |---|---|---|
-| `MUSIC_DATA_PLAYER_REF` | `946f25c1b50ca1cbb8209ca766056a1a2f6c3aca` | the ournotes-player commit supporting nominal chart-stats/3; custom overrides must pass the same format smoke test before building |
+| `MUSIC_DATA_PLAYER_REF` | `44d31754f8b2ba0fe414eaf49586d375ecb3c0d0` | the ournotes-player commit supporting nominal chart-stats/3; custom overrides must pass the same format smoke test before building |
 | `MUSIC_DATA_PUBLISH` | none: off | `true`: upload; anything else: every run is a dry run |
 | `MUSIC_DATA_PLAYER_REPOSITORY` | `empty-sekai/ournotes-player` | |
 | `MUSIC_DATA_REGIONS` | `hk-tw-mo jp` | regions checked independently by dispatch/schedule |

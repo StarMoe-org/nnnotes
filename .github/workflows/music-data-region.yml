@@ -32,7 +32,7 @@ env:
   # This consumer reads nominal chart-stats/3. Explicit overrides must support the same format; the page's modules
   # smoke-test the new format before master-data download and every completed artifact before publication.
   PLAYER_REPOSITORY: ${{ vars.MUSIC_DATA_PLAYER_REPOSITORY || 'empty-sekai/ournotes-player' }}
-  PLAYER_REF: ${{ vars.MUSIC_DATA_PLAYER_REF || '946f25c1b50ca1cbb8209ca766056a1a2f6c3aca' }}
+  PLAYER_REF: ${{ vars.MUSIC_DATA_PLAYER_REF || '44d31754f8b2ba0fe414eaf49586d375ecb3c0d0' }}
   PLAYFETCH_VERSION: ${{ vars.PLAYFETCH_VERSION || 'v0.92' }}
   APK_PACKAGE: ${{ inputs.region == 'jp' && 'com.bushiroad.sirius' || vars.STORY_APK_PACKAGE || 'com.bilibili.sirius' }}
   PYTHON_VERSION: "3.13"
