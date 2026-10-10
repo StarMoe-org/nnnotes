@@ -8,7 +8,7 @@ on:
         type: string
         required: true
       dry_run:
-        description: Validate the new UI and list nine uploads without writing objects
+        description: Validate the new UI and list ten uploads without writing objects
         type: boolean
         default: true
 
@@ -62,7 +62,7 @@ jobs:
         run: |
           node publisher/.github/scripts/prebuilt_publish_smoke.mjs \
             "$GITHUB_WORKSPACE/player/examples/songs" "$WORK/data"
-      - name: Validate the clean nine-file closure without credentials
+      - name: Validate the clean ten-file closure without credentials
         run: |
           python publisher/.github/scripts/prebuilt_publish_page.py \
             --publisher "$GITHUB_WORKSPACE/publisher/.github/scripts/music_data.py" \

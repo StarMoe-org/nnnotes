@@ -30,9 +30,9 @@ def main():
     if subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all", "--", relative_page], text=True).strip():
         p.error("page files are dirty")
     files = sorted(a.page.iterdir())
-    expected = {"index.html", "catalog.js", "ranking.js", "pareto.js", "songs.js", "text.js", "replay-panel.js", "replay-worker.js", "replay-preset.js"}
+    expected = {"index.html", "catalog.js", "expectation.js", "ranking.js", "pareto.js", "songs.js", "text.js", "replay-panel.js", "replay-worker.js", "replay-preset.js"}
     if {v.name for v in files} != expected or any(not v.is_file() or v.is_symlink() for v in files):
-        p.error("pinned songs module closure is not the reviewed nine files")
+        p.error("pinned songs module closure is not the reviewed ten files")
     spec = importlib.util.spec_from_file_location("music_data", a.publisher)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

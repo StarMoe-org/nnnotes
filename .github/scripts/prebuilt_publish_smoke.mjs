@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 
 const [page, out] = process.argv.slice(2);
 if (!page || !out) throw new Error("usage: prebuilt_publish_smoke.mjs <examples/songs> <out>");
-for (const filename of ["replay-panel.js", "replay-worker.js", "replay-preset.js", "text.js", "catalog.js", "ranking.js"]) {
+for (const filename of ["replay-panel.js", "replay-worker.js", "replay-preset.js", "text.js", "catalog.js", "expectation.js", "ranking.js"]) {
   await fs.access(path.join(page, filename));
   execFileSync(process.execPath, ["--check", path.join(page, filename)], { stdio: "pipe" });
 }
