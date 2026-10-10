@@ -4,9 +4,9 @@ fails on the defect it is there for. Runs in seconds, without the network:
     python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py
 
 The JSON Schema gate uses docs/schema/music-data.schema.json (or $MUSIC_DATA_SCHEMA) when the checkout has it; the
-page smoke test runs when $MUSIC_DATA_PAGE names ournotes-player's examples/songs (and Node.js is installed). Real
-files, when named: $MUSIC_DATA_SAMPLE (a current nnnotes.music-data/2 file: the content gates pass) and
-$MUSIC_DATA_OLD_SAMPLE (a legacy sampled file: the deck gate rejects its missing nominal expectations).
+page smoke test runs when $MUSIC_DATA_PAGE names ournotes-player's examples/songs; a configured page requires its
+modules and Node.js. Real files, when named: $MUSIC_DATA_SAMPLE (a current nnnotes.music-data/2 file: the content gates
+pass) and $MUSIC_DATA_OLD_SAMPLE (a legacy sampled file: the deck gate rejects its missing nominal expectations).
 """
 import copy
 import hashlib
@@ -42,7 +42,28 @@ def schema_path():
 
 def page_path():
     p = os.environ.get("MUSIC_DATA_PAGE")
-    return Path(p) if p and Path(p, "ranking.js").is_file() and shutil.which("node") else None
+    if not p:
+        return None
+    page = Path(p)
+    assert shutil.which("node"), "MUSIC_DATA_PAGE requires Node.js"
+    for name in ("catalog.js", "ranking.js"):
+        assert (page / name).is_file(), f"MUSIC_DATA_PAGE has no {name}"
+    assert "aptitudeFigures" in (page / "ranking.js").read_text(encoding="utf-8"), \
+        "MUSIC_DATA_PAGE ranking.js has no aptitudeFigures API"
+    return page
+
+
+@pytest.mark.parametrize("missing", ["node", "catalog.js", "ranking.js", "aptitudeFigures"])
+def test_configured_page_requires_its_modules_and_runtime(tmp_path, monkeypatch, missing):
+    monkeypatch.setenv("MUSIC_DATA_PAGE", str(tmp_path))
+    monkeypatch.setattr(shutil, "which", lambda name: None if missing == "node" else "node")
+    (tmp_path / "catalog.js").write_text("export const catalog = {};", encoding="utf-8")
+    (tmp_path / "ranking.js").write_text("" if missing == "aptitudeFigures" else "export const aptitudeFigures = {};",
+                                       encoding="utf-8")
+    if missing.endswith(".js"):
+        (tmp_path / missing).unlink()
+    with pytest.raises(AssertionError, match="MUSIC_DATA_PAGE"):
+        page_path()
 
 
 # ---------------------------------------------------------------- a synthetic file
@@ -290,8 +311,8 @@ def test_page_smoke(tmp_path):
 
 def test_page_aptitude_check_reconstruction(tmp_path):
     page = page_path()
-    if page is None or "aptitudeFigures" not in (page / "ranking.js").read_text(encoding="utf-8"):
-        pytest.skip("page does not yet expose the aptitude API")
+    if page is None:
+        pytest.skip("set MUSIC_DATA_PAGE to ournotes-player's examples/songs")
     doc = sample()
     # Replay seeds do not change any nominal figure or its independent expectation check.
     doc["songs"][0]["charts"][1]["deck"]["replaySeeds"] = []

@@ -104,8 +104,8 @@ A failed run leaves the pointer on the previous bundle; the objects it already c
 and unreferenced), and the next run resumes: matching objects are kept, only missing ones are uploaded.
 
 Triggers: `repository_dispatch` `masterdata-updated` (moenotes-masterdata-sync's `dispatch_repositories` already names
-this repository: the story site and music data workflows run on it too), a daily schedule (03:53 UTC) in case a dispatch
-was missed, and `workflow_dispatch`:
+this repository: the story site and music data workflows run on it too), a schedule every six hours (at minute 53, UTC)
+in case a dispatch was missed, and `workflow_dispatch`:
 
 | Input | Meaning |
 |---|---|
@@ -113,6 +113,13 @@ was missed, and `workflow_dispatch`:
 | `dry_run` | build and check, then list what would be uploaded instead of uploading |
 
 Runs do not overlap (`concurrency: recognition-gallery`).
+
+**Waiting for the artwork.** A new master version is served before the asset service has exported its files, so the
+artwork of new cards is missing at first. The catalog is read only once the asset service's `/versions/current_version.json`
+lists, for every region, a release of the same master version in state `succeeded` or `partial`. Until then the plan job
+reads the master data and that file again every `RECOGNITION_EXPORT_POLL` seconds (60), for up to
+`RECOGNITION_EXPORT_WAIT` seconds (3600), and then stops with the pointer unchanged. The build job does not wait: a
+master version that moved after the plan stops it, and that version's own dispatch builds it.
 
 **Publishing switch.** Nothing is uploaded unless the repository variable `RECOGNITION_PUBLISH` is `true` (unset: off).
 Off, every run is a dry run, whatever its trigger: the runtime and publish steps get no bucket key and only read. Turn it
