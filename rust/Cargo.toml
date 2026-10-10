@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.29", features = ["abi3-py311"] }
 # The model source is pinned exactly. Publishing additionally requires replay/recommendation release engines
 # from that same revision; .github/workflows/deck.yml tracks newer model releases.
-ournotes-sim = { git = "https://github.com/empty-sekai/ournotes-deck", rev = "df86cc758e57da662582f9167752ce7ac68013e5" }
+ournotes-sim = { git = "https://github.com/empty-sekai/ournotes-deck", rev = "67835811e06f3d528adb90ae64b012a0eb5f8966" }
 serde_json = { version = "1", features = ["raw_value", "arbitrary_precision"] }
 
 [profile.release]
