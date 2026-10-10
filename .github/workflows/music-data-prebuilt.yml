@@ -33,7 +33,7 @@ permissions:
   contents: write
 
 concurrency:
-  # Both regions and songs-page.yml publish the same nine-file songs/ closure.
+  # Both regions and songs-page.yml publish the same ten-file songs/ closure.
   group: songs-page-publication
   cancel-in-progress: false
 
