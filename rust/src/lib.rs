@@ -1,10 +1,10 @@
-//! `nnnotes._deck`: the chart statistics of the deck model ournotes-sim (`ournotes-deck.chart-stats/2`) on a deck
+//! `nnnotes._deck`: the chart statistics of the deck model ournotes-sim (`ournotes-deck.chart-stats/3`) on a deck
 //! data document held in memory, the charts measured in parallel.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ournotes_sim::chartstats::{self, AptitudeOptions, ChartStats, GEKISOU_SEEDS, Options};
+use ournotes_sim::chartstats::{self, ChartStats, ChartStatsCache, Options, REPLAY_SEEDS};
 use ournotes_sim::data::DeckData;
 use ournotes_sim::error::Error;
 use pyo3::exceptions::PyValueError;
@@ -16,7 +16,12 @@ fn value_error(e: impl std::fmt::Display) -> PyErr {
 }
 
 /// The statistics of every chart, in chart order, on `workers` threads.
-fn measure(data: &DeckData, options: &Options, workers: usize) -> Result<Vec<ChartStats>, Error> {
+fn measure(
+    data: &DeckData,
+    options: &Options,
+    workers: usize,
+    cache: Option<&ChartStatsCache>,
+) -> Result<Vec<ChartStats>, Error> {
     let kinds = chartstats::kinds(&data.master);
     let n = data.charts.len();
     let next = AtomicUsize::new(0);
@@ -31,7 +36,11 @@ fn measure(data: &DeckData, options: &Options, workers: usize) -> Result<Vec<Cha
                     }
                     let c = &data.charts[i];
                     // as chartstats::document names a chart's domain errors
-                    let r = chartstats::chart_stats_with(&data.master, c, &kinds, options).map_err(|e| match e {
+                    let r = match cache {
+                        Some(cache) => chartstats::chart_stats_with_cache(&data.master, c, &kinds, options, cache),
+                        None => chartstats::chart_stats_with(&data.master, c, &kinds, options),
+                    }
+                    .map_err(|e| match e {
                         Error::Domain(m) => Error::Domain(format!("chart {}: {m}", c.score_id)),
                         e => e,
                     });
@@ -53,45 +62,69 @@ fn measure(data: &DeckData, options: &Options, workers: usize) -> Result<Vec<Cha
     Ok(stats)
 }
 
-/// chart_stats(data, seeds=None, workers=None, aptitude=True, aptitude_max_seeds=None,
-///             aptitude_cross_seeds=None) -> str
+fn document(
+    data: &str,
+    seeds: Option<usize>,
+    workers: Option<usize>,
+    aptitude: bool,
+    cache: Option<&ChartStatsCache>,
+) -> PyResult<String> {
+    let options = Options { replay_seeds: seeds.unwrap_or(REPLAY_SEEDS), aptitude };
+    let workers = workers.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let mut data = DeckData::from_json(data).map_err(value_error)?;
+    let charts = std::mem::take(&mut data.charts);
+    let mut doc = chartstats::document_with(&data, &options).map_err(value_error)?;
+    data.charts = charts;
+    let stats = measure(&data, &options, workers, cache).map_err(value_error)?;
+    doc["charts"] = serde_json::to_value(stats).map_err(value_error)?;
+    serde_json::to_string(&doc).map_err(value_error)
+}
+
+/// chart_stats(data, seeds=None, workers=None, aptitude=True) -> str
 ///
-/// The `ournotes-deck.chart-stats/2` document (JSON text) of a deck data document (`nnnotes.deck-data/1` JSON text),
-/// as `ournotes-deck chart-stats` writes it. `seeds`: the size of the seed set of charts with a luck range (default
-/// 8); `workers`: threads measuring charts (default: the available parallelism). Raises ValueError for data the
-/// deck model cannot read or a chart whose check deck fails. `aptitude`: measure single Gekisou skill shapes
-/// (default true); `aptitude_max_seeds` and `aptitude_cross_seeds`: sample caps (defaults 65536 and 64).
+/// The `ournotes-deck.chart-stats/3` document (JSON text) of a deck data document (`nnnotes.deck-data/1` JSON text).
+/// `seeds` controls the replay seed list (default 8); expectations use independent nominal probabilities.
+/// `workers` controls chart parallelism. `aptitude` includes single Gekisou skill shapes (default true).
+/// Raises ValueError for invalid data or a failed native expectation check.
 #[pyfunction]
-#[pyo3(signature = (data, seeds=None, workers=None, aptitude=true, aptitude_max_seeds=None, aptitude_cross_seeds=None))]
+#[pyo3(signature = (data, seeds=None, workers=None, aptitude=true))]
 fn chart_stats(
     py: Python<'_>,
     data: &str,
     seeds: Option<usize>,
     workers: Option<usize>,
     aptitude: bool,
-    aptitude_max_seeds: Option<usize>,
-    aptitude_cross_seeds: Option<usize>,
 ) -> PyResult<String> {
-    let seeds = seeds.unwrap_or(GEKISOU_SEEDS);
-    let defaults = AptitudeOptions::default();
-    let options = Options {
-        seeds,
-        aptitude: aptitude.then_some(AptitudeOptions {
-            max_seeds: aptitude_max_seeds.unwrap_or(defaults.max_seeds),
-            cross_seeds: aptitude_cross_seeds.unwrap_or(defaults.cross_seeds),
-        }),
-    };
-    let workers = workers.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    py.detach(|| {
-        let mut data = DeckData::from_json(data).map_err(value_error)?;
-        let charts = std::mem::take(&mut data.charts);
-        // the document of no chart: the format, source, model and kinds, exactly as the command writes them
-        let mut doc = chartstats::document_with(&data, &options).map_err(value_error)?;
-        data.charts = charts;
-        let stats = measure(&data, &options, workers).map_err(value_error)?;
-        doc["charts"] = serde_json::to_value(stats).map_err(value_error)?;
-        serde_json::to_string(&doc).map_err(value_error)
-    })
+    py.detach(|| document(data, seeds, workers, aptitude, None))
+}
+
+/// chart_stats_cached(data, seeds=None, workers=None, aptitude=True, *, cache_dir) -> (str, dict)
+///
+/// Persist exact native computation units and return operation counters separately from the document.
+/// Completed units survive a later failure; every call validates the complete input and rebuilds its header.
+#[pyfunction]
+#[pyo3(signature = (data, seeds=None, workers=None, aptitude=true, *, cache_dir))]
+fn chart_stats_cached<'py>(
+    py: Python<'py>,
+    data: &str,
+    seeds: Option<usize>,
+    workers: Option<usize>,
+    aptitude: bool,
+    cache_dir: &str,
+) -> PyResult<(String, Bound<'py, PyDict>)> {
+    let (text, stats) = py.detach(|| {
+        let cache = ChartStatsCache::new(cache_dir).map_err(value_error)?;
+        let text = document(data, seeds, workers, aptitude, Some(&cache))?;
+        Ok::<_, PyErr>((text, cache.snapshot()))
+    })?;
+    let counts = PyDict::new(py);
+    counts.set_item("requests", stats.requests)?;
+    counts.set_item("hits", stats.hits)?;
+    counts.set_item("computed", stats.computed)?;
+    counts.set_item("writes", stats.writes)?;
+    counts.set_item("invalid", stats.invalid)?;
+    counts.set_item("bytes", stats.bytes)?;
+    Ok((text, counts))
 }
 
 /// info() -> dict: the deck model of this module (name: the ournotes-deck repository; version, source and commit:
@@ -113,6 +146,7 @@ fn info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 #[pymodule]
 fn _deck(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chart_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(chart_stats_cached, m)?)?;
     m.add_function(wrap_pyfunction!(info, m)?)?;
     Ok(())
 }

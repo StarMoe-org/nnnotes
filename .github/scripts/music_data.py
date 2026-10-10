@@ -50,11 +50,11 @@ import story_site                                   # noqa: E402  (the bucket, H
 import http_compression                             # noqa: E402
 from story_site import env, get, output, summary   # noqa: E402
 
-FORMAT = "nnnotes.music-data/1"
+FORMAT = "nnnotes.music-data/2"
 BUILD_FORMAT = "moenotes.music-data-build/1"
 # This script's own version of a build: bump it when what it builds or publishes changes, so that the next run builds
 # although the master data, the deck model and nnnotes are the same.
-RECIPE = 7
+RECIPE = 8
 FILE, FILE_BR, MARKER, JACKETS, ARCHIVE = "music-data.json", "music-data.json.br", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
 SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
@@ -367,7 +367,8 @@ def cmd_build(out: str) -> None:
     stats = r.get("deckStats") or {}
     summary(f"- built: {r.get('songs')} songs, {r.get('charts')} charts, {r.get('jackets')} jackets, deck "
             f"{short(r.get('deck'))}, {r.get('bytes')} bytes, sha256 {short(r.get('sha256'))}; chart statistics "
-            f"{stats.get('cached')} cached, {stats.get('measured')} measured")
+            f"{stats.get('hits', 0)} native cache hits, {stats.get('computed', 0)} computed, "
+            f"{stats.get('writes', 0)} checkpoint writes, {stats.get('invalid', 0)} invalid entries")
 
 
 def release_engines(out: Path) -> tuple[Path, ...]:
@@ -666,10 +667,15 @@ def weights_shape(w, kinds: int, positions: int, nullable: bool) -> bool:
         (nullable and k is None) or (isinstance(k, list) and len(k) == positions and all(map(is_num, k))) for k in w)
 
 
+def native_numbers(value):
+    """Read a gate value with the exporter's lossless JSON number representation."""
+    from nnnotes.deckdata import _Num
+    return json.loads(json.dumps(value), parse_float=_Num)
+
+
 def gate_deck(doc, ctx: Context, g: Gate):
-    """The deck statistics. Seeds (deck.model.seeds): the one seed 0 on a chart without a luck range, else two or more
-    seeds, the same on every luck chart (their number is the file's); every range's rankBonus the rank 1 bonus and
-    its luckPoints (the range's luck points without skills)."""
+    """Validate nominal expectations, independent Free Live runs and replay-only seed lists."""
+    from nnnotes import musicdata
     deck = doc.get("deck")
     if not isinstance(deck, dict):
         g.fail("deck is null: no deck statistics (made with --no-deck?)")
@@ -680,7 +686,7 @@ def gate_deck(doc, ctx: Context, g: Gate):
     power = (deck.get("model") or {}).get("power")
     if not (is_num(power) and power > 0):
         g.fail(f"deck.model.power {power!r}")
-    n = unplayable = seeds = 0
+    n = unplayable = 0
     luck_seeds = None
     for song, chart in charts_of(doc):
         n += 1
@@ -689,58 +695,37 @@ def gate_deck(doc, ctx: Context, g: Gate):
             g.fail(f"{w}: no deck statistics")
             continue
         positions, events = d.get("positions"), d.get("events") or []
-        if len(events) != len(chart.get("skillEventsMs") or []):
-            g.fail(f"{w}: {len(events)} skill events, the chart has {len(chart.get('skillEventsMs') or [])}")
-        if not is_int(positions) or (events and positions != max(e[0] for e in events) + 1):
+        if [event[1] for event in events] != (chart.get("skillEventsMs") or []):
+            g.fail(f"{w}: skill events do not match the chart")
+        if not is_int(positions) or positions < 0 or positions != max((e[0] + 1 for e in events), default=0):
             g.fail(f"{w}: positions {positions!r} do not match the events")
             continue
-        if d.get("unplayable"):
+        values = d.get("replaySeeds")
+        if d.get("unplayable") is not None:
             unplayable += 1
             g.warn(f"{w}: unplayable with Gekisou on ({d['unplayable']})")
-            if d.get("seeds"):
-                g.fail(f"{w}: unplayable, but has Gekisou on seeds")
-        elif not d.get("seeds"):
-            g.fail(f"{w}: no seeds")
-        values = [s.get("seed") for s in d.get("seeds") or []]
-        if values and not luck_chart(d):
-            if len(values) != 1 or not is_int(values[0]) or values[0] != 0:
-                g.fail(f"{w}: seeds {values[:4]!r} without a luck range, expected the one seed 0")
-        elif values:
-            if not all(map(is_int, values)) or len(values) < 2 or len(set(values)) != len(values):
-                g.fail(f"{w}: {len(values)} seeds on a luck chart, expected two or more different int seeds")
-            elif luck_seeds is None:
-                luck_seeds = values
-            elif values != luck_seeds:
-                g.fail(f"{w}: its {len(values)} seeds are not the {len(luck_seeds)} of the first luck chart")
-        for seed in d.get("seeds") or []:
-            seeds += 1
-            s = f"{w} seed {seed.get('seed')}"
-            if not is_int(seed.get("score")):
-                g.fail(f"{s}: score {seed.get('score')!r}")
-            if not weights_shape(seed.get("weights"), kinds, positions, nullable=False):
-                g.fail(f"{s}: weights are not [kind][position] numbers")
-            if len(seed.get("ranges") or []) != len(d.get("ranges") or []):
-                g.fail(f"{s}: {len(seed.get('ranges') or [])} range results for {len(d.get('ranges') or [])} ranges")
-            for i, (r, rr) in enumerate(zip(seed.get("ranges") or [], d.get("ranges") or [], strict=False)):
-                r, rr = (r if isinstance(r, dict) else {}), (rr if isinstance(rr, dict) else {})
-                if not (is_int(r.get("rangeScore")) and is_int(r.get("rankBonus"))):
-                    g.fail(f"{s} range {i}: rangeScore {r.get('rangeScore')!r}, rankBonus {r.get('rankBonus')!r}")
-                elif is_int(rr.get("rankBonusPercent")) and r["rankBonus"] != rank_bonus(r["rangeScore"],
-                                                                                         rr["rankBonusPercent"]):
-                    g.fail(f"{s} range {i}: rankBonus {r['rankBonus']} is not trunc({r['rangeScore']} * "
-                           f"{rr['rankBonusPercent']} / 100)")
-                if not is_int(r.get("luckPoints")):
-                    g.fail(f"{s} range {i}: luckPoints {'missing' if 'luckPoints' not in r else 'not an int'}")
-            if not within(seed.get("check")):
-                g.fail(f"{s}: the check deck is not within its bound")
-    g.note = (f"{n} charts, {kinds} kinds, {seeds} seeds, {unplayable} unplayable, "
-              f"{len(luck_seeds or [])} seeds per luck chart")
+            if values != []:
+                g.fail(f"{w}: unplayable, but has replay seeds")
+        elif not isinstance(values, list) or not values or not all(is_int(v) for v in values):
+            g.fail(f"{w}: replaySeeds must be a nonempty integer list")
+        elif not luck_chart(d):
+            if values != [0]:
+                g.fail(f"{w}: replaySeeds without a luck range must be [0]")
+        elif values != musicdata.published_seeds(len(values)):
+            g.fail(f"{w}: replaySeeds are not the published seed prefix")
+        elif luck_seeds is None:
+            luck_seeds = values
+        elif values != luck_seeds:
+            g.fail(f"{w}: replaySeeds differ between luck charts")
+        try:
+            musicdata._check_expectation(native_numbers({**d, "judgedNotes": chart["notes"]["judged"]}), kinds, w)
+        except (ValueError, TypeError, KeyError, IndexError) as e:
+            g.fail(str(e))
+    g.note = f"{n} charts, {kinds} kinds, nominal expectations, {unplayable} unplayable"
 
 
 def gate_scenarios(doc, ctx: Context, g: Gate):
-    """The play scenario fields (Gekisou off, every rank, the Perfect play): offSeeds exactly one, every range's
-    rankBonusPercents five ints, every seed scorePerfect, rangeWeights and rankCheck, every seed range
-    rangeScorePerfect. A null rangeWeights, a null kind in it or in offSeeds' weights is a warning (none in TW)."""
+    """Validate scenario availability and rank coefficients; expectations are checked by the deck gate."""
     kinds = len(((doc.get("deck") or {}).get("kinds")) or [])
     null_rw = null_kind = null_off = 0
     for song, chart in charts_of(doc):
@@ -751,11 +736,11 @@ def gate_scenarios(doc, ctx: Context, g: Gate):
         positions, ranges = d.get("positions"), d.get("ranges") or []
         off = d.get("offSeeds")
         if not isinstance(off, list) or len(off) != 1:
-            g.fail(f"{w}: offSeeds {'missing' if off is None else f'has {len(off)} entries'}, expected exactly one")
+            g.fail(f"{w}: offSeeds missing or not exactly one entry")
         else:
             o = off[0]
             if o.get("seed") != 0 or not is_int(o.get("score")):
-                g.fail(f"{w}: Gekisou off seed {o.get('seed')!r} score {o.get('score')!r}")
+                g.fail(f"{w}: invalid Gekisou off seed or score")
             if not weights_shape(o.get("weights"), kinds, positions, nullable=True):
                 g.fail(f"{w}: Gekisou off weights are not [kind][position] numbers")
             else:
@@ -765,64 +750,41 @@ def gate_scenarios(doc, ctx: Context, g: Gate):
         for i, r in enumerate(ranges):
             p = r.get("rankBonusPercents")
             if not (isinstance(p, list) and len(p) == RANKS and all(map(is_int, p))):
-                g.fail(f"{w} range {i}: rankBonusPercents {'missing' if p is None else 'not five ints'}")
+                g.fail(f"{w} range {i}: rankBonusPercents are not five ints")
             elif p[0] != r.get("rankBonusPercent"):
-                g.fail(f"{w} range {i}: rankBonusPercents[0] {p[0]} is not rankBonusPercent "
-                       f"{r.get('rankBonusPercent')}")
-        for seed in d.get("seeds") or []:
-            s = f"{w} seed {seed.get('seed')}"
-            absent = [k for k in ("scorePerfect", "rangeWeights", "rankCheck") if k not in seed]
-            if absent:
-                g.fail(f"{s}: no {', '.join(absent)}")
-                continue
-            if not is_int(seed["scorePerfect"]):
-                g.fail(f"{s}: scorePerfect {seed['scorePerfect']!r}")
-            for i, r in enumerate(seed.get("ranges") or []):
-                if not is_int(r.get("rangeScorePerfect")):
-                    why = "missing" if "rangeScorePerfect" not in r else "not an int"
-                    g.fail(f"{s} range {i}: rangeScorePerfect {why}")
-            rw = seed["rangeWeights"]
-            if rw is None:
-                null_rw += 1
-            elif not (isinstance(rw, list) and len(rw) == kinds and all(
-                    k is None or (isinstance(k, list) and len(k) == positions and all(
-                        isinstance(x, list) and len(x) == len(ranges) and all(map(is_num, x)) for x in k))
-                    for k in rw)):
-                g.fail(f"{s}: rangeWeights are not [kind][position][range] numbers")
-            else:
-                null_kind += sum(k is None for k in rw)
-            rc = seed["rankCheck"]
-            if rc is not None:
-                if len(rc.get("ranks") or []) != len(ranges) or not all(
-                        is_int(x) and 1 <= x <= RANKS for x in rc.get("ranks") or []):
-                    g.fail(f"{s}: rankCheck ranks are not one rank per range")
-                elif not within(rc):
-                    g.fail(f"{s}: the rank check deck is not within its bound")
+                g.fail(f"{w} range {i}: rankBonusPercents[0] is not rankBonusPercent")
+        expected = d.get("expectation")
+        if expected is None:
+            if d.get("unplayable") is None:
+                g.fail(f"{w}: no Gekisou expectation")
+            continue
+        for key in ("scorePerfect", "rangeWeights", "rankCheck"):
+            if key not in expected:
+                g.fail(f"{w}: expectation has no {key}")
+        rw = expected.get("rangeWeights")
+        if rw is None:
+            null_rw += 1
+        elif isinstance(rw, list):
+            null_kind += sum(k is None for k in rw)
     if null_rw:
-        g.warn(f"{null_rw} seeds have rangeWeights null (overlapping ranges: no rank scenarios on those charts)")
+        g.warn(f"{null_rw} charts have rangeWeights null (no linear rank scenarios)")
     if null_kind:
         g.warn(f"{null_kind} rangeWeights kinds are null (conditions on the confirmed rank)")
     if null_off:
         g.warn(f"{null_off} Gekisou off weight kinds are null (conditions on the Gekisou state)")
-    g.note = "offSeeds, rankBonusPercents, scorePerfect, rangeWeights, rankCheck, rangeScorePerfect"
+    g.note = "offSeeds, expected Perfect scores and bonuses, rangeWeights and rank checks"
 
 
-APTITUDE_KEYS = ("plainKind", "host", "seedRule", "shapes")
-SEED_RULE_KEYS = ("deterministicTest", "batches", "relative", "baseline", "crossSeeds")
+APTITUDE_KEYS = ("plainKind", "host", "law", "shapes")
 SHAPE_KEYS = ("id", "source", "mission", "bandCondition", "effects", "skills")
 EFFECT_INTS = ("effectType", "triggerType", "effectValue", "maxEffectValue", "effectLimitCount",
                "effectExecuteLimitCount")
 EFFECT_GROUPS = ("trigger", "condition", "release", "reset")
 FACTOR_INTS = ("judgedNotes", "justNotes", "perfectNotes", "tailNotes", "comboAtStart")
-VARIANT_KEYS = ("shape", "bandMatch", "deterministic", "seeds", "seTargetMet", "crossSeeds", "score", "scorePerfect",
-                "tail", "tailPerfect", "converted", "ranges", "weights", "rangeWeights", "check")
-VARIANT_PAIRS = ("score", "scorePerfect", "tail", "tailPerfect", "converted")
-VARIANT_RANGE_PAIRS = ("rangeScore", "rankBonus", "rangeScorePerfect", "maxCombo", "justCount", "luckPoints")
-APTITUDE_CHECK_KEYS = ("seed", "ranks", "deck", "exact", "predicted", "bound")
 
 
 def pair(v) -> bool:
-    """A [mean, standard error]: two finite numbers, the error not negative."""
+    """A [center, outward radius]: two finite numbers, the radius not negative."""
     return isinstance(v, list) and len(v) == 2 and is_num(v[0]) and is_num(v[1]) and v[1] >= 0
 
 
@@ -831,14 +793,7 @@ def close(a: float, b: float) -> bool:
 
 
 def gate_aptitude(doc, ctx: Context, g: Gate):
-    """The charts' Gekisou skill aptitude: deck.gekisouAptitude (its plain kind the page's, the seed rule, shapes
-    numbered from 0: source, mission, band condition, effect rows, skills); every chart's deck.gekisouAptitude, null
-    exactly when the chart is unplayable with Gekisou on, has no Gekisou range or there is no shape; else factors per
-    range and one variant per shape of the chart's missions (or mission 4) in shape order, a band condition shape's
-    bandMatch true then false: every [mean, se] two finite numbers with se >= 0 (0 when deterministic), ranges per
-    range, tail = score - the ranges' rangeScore and rankBonus, the seeds and the cross seeds by the seed rule, weights
-    and rangeWeights where the plain kind and the chart's rank weights are, the check within its bound. Every
-    variant must meet the seed rule's standard error target, including at the sample cap."""
+    """Validate the current shape catalog and every independent nominal aptitude result."""
     deck = doc.get("deck")
     if not isinstance(deck, dict):
         g.fail("deck is null: no Gekisou skill aptitude")
@@ -858,15 +813,8 @@ def gate_aptitude(doc, ctx: Context, g: Gate):
             g.fail(f"deck.gekisouAptitude.plainKind {pk!r}, the page's plain kind is {plain!r}")
         if not (isinstance(head.get("host"), str) and head["host"].strip()):
             g.fail("deck.gekisouAptitude.host: no text")
-    rule = head.get("seedRule") if isinstance(head.get("seedRule"), dict) else {}
-    batches = rule.get("batches")
-    if head and not (all(k in rule for k in SEED_RULE_KEYS) and is_int(rule["deterministicTest"])
-                     and rule["deterministicTest"] >= 1 and isinstance(batches, list) and batches
-                     and all(map(is_int, batches)) and batches == sorted(set(batches)) and batches[0] >= 1
-                     and is_num(rule["relative"]) and rule["relative"] >= 0 and is_num(rule["baseline"])
-                     and rule["baseline"] >= 0 and is_int(rule["crossSeeds"]) and rule["crossSeeds"] >= 1):
-        g.fail(f"deck.gekisouAptitude.seedRule {rule!r}"[:200])
-        rule, batches = {}, None
+    if head.get("law") != "independent nominal lottery and skill probabilities":
+        g.fail(f"deck.gekisouAptitude.law {head.get('law')!r}")
 
     # the shapes
     shapes = head.get("shapes") if isinstance(head.get("shapes"), list) else []
@@ -948,201 +896,22 @@ def gate_aptitude(doc, ctx: Context, g: Gate):
                 g.fail(f"{w}: skill {k!r} is not an id, a level and (with a band condition alone) member targets "
                        f"and bands"[:240])
 
-    # the charts
-    aptitudes = nulls = variants = deterministic = 0
-    missed = []
+    from nnnotes.musicdata import validate_aptitude_statistics
+    aptitudes = variants = 0
     for song, chart in charts_of(doc):
         w, d = where(song, chart), chart.get("deck")
         if not isinstance(d, dict):
-            continue                                 # the deck gate fails it
-        if "gekisouAptitude" not in d:
-            g.fail(f"{w}: no deck.gekisouAptitude")
             continue
-        a, ranges, dseeds = d["gekisouAptitude"], d.get("ranges") or [], d.get("seeds") or []
-        why = ("unplayable with Gekisou on" if d.get("unplayable") else "without a Gekisou range" if not ranges
-               else None if shapes else "without a Gekisou skill shape")
-        if a is None:
-            nulls += 1
-            if why is None:
-                g.fail(f"{w}: deck.gekisouAptitude is null, but the chart is playable with Gekisou on")
+        try:
+            validate_aptitude_statistics(head, native_numbers({**d, "judgedNotes": chart["notes"]["judged"]}), w)
+        except (ValueError, TypeError, KeyError, IndexError) as e:
+            g.fail(str(e))
             continue
-        if why is not None:
-            g.fail(f"{w}: a Gekisou skill aptitude on a chart {why}")
-            continue
-        if not (isinstance(a, dict) and isinstance(a.get("factors"), list) and isinstance(a.get("variants"), list)):
-            g.fail(f"{w}: deck.gekisouAptitude has no factors and variants lists")
-            continue
-        aptitudes += 1
-        positions = d.get("positions")
-        missions = {r.get("mission") for r in ranges if isinstance(r, dict)}
-        linear = bool(dseeds) and dseeds[0].get("rangeWeights") is not None
+        if d.get("gekisouAptitude") is not None:
+            aptitudes += 1
+            variants += len(d["gekisouAptitude"]["variants"])
+    g.note = f"{len(shapes)} shapes, {aptitudes} charts, {variants} independent nominal variants"
 
-        # factors
-        if len(a["factors"]) != len(ranges):
-            g.fail(f"{w}: {len(a['factors'])} factors for {len(ranges)} ranges")
-        for j, (f, r) in enumerate(zip(a["factors"], ranges, strict=False)):
-            f, r = (f if isinstance(f, dict) else {}), (r if isinstance(r, dict) else {})
-            bad = [k for k in FACTOR_INTS if not (is_int(f.get(k)) and f[k] >= 0)]
-            if not pair(f.get("lotteries")):
-                bad.append("lotteries")
-            if bad:
-                g.fail(f"{w} factors {j}: {', '.join(bad)} missing or not counts")
-                continue
-            if r.get("mission") != JUST_MISSION and (f["justNotes"] or f["perfectNotes"]):
-                g.fail(f"{w} factors {j}: Just or Perfect notes in a range without the Just mission")
-            if f["justNotes"] + f["perfectNotes"] > f["judgedNotes"]:
-                g.fail(f"{w} factors {j}: {f['justNotes']} Just and {f['perfectNotes']} Perfect notes of "
-                       f"{f['judgedNotes']} judged")
-            at = [s["ranges"][j] for s in dseeds if isinstance(s.get("ranges"), list) and len(s["ranges"]) > j
-                  and isinstance(s["ranges"][j], dict)]
-            lots = [sum(x["lotResults"]) for x in at
-                    if isinstance(x.get("lotResults"), list) and all(map(is_int, x["lotResults"]))]
-            if r.get("mission") != LUCK_MISSION and f["lotteries"] != [0, 0]:
-                g.fail(f"{w} factors {j}: lotteries {f['lotteries']} in a range without the luck mission")
-            elif lots and len(lots) == len(dseeds) and not close(f["lotteries"][0], sum(lots) / len(lots)):
-                g.fail(f"{w} factors {j}: lotteries {f['lotteries'][0]}, deck.seeds' lotResults give "
-                       f"{sum(lots) / len(lots)}")
-
-        # the variants: which, in order
-        want = [(s["id"], match) for s in sorted(by_id.values(), key=lambda s: s["id"])
-                if s["mission"] == 4 or s["mission"] in missions
-                for match in ((True, False) if s["bandCondition"] is True else (None,))]
-        got = [(v.get("shape"), v.get("bandMatch")) if isinstance(v, dict) else None for v in a["variants"]]
-        unknown = [v[0] for v in got if v is not None and not (is_int(v[0]) and v[0] in by_id)]
-        other = [v[0] for v in got if v is not None and is_int(v[0]) and v[0] in by_id
-                 and by_id[v[0]]["mission"] != 4 and by_id[v[0]]["mission"] not in missions]
-        if unknown:
-            g.fail(f"{w}: variants of shapes {sorted(set(map(repr, unknown)))} not in deck.gekisouAptitude.shapes")
-        if other:
-            g.fail(f"{w}: variants of shapes {sorted(set(other))} of a mission the chart does not play")
-        if got != want and not unknown and not other:
-            lacking = [x for x in want if x not in got]
-            g.fail(f"{w}: variants {'lack ' + repr(lacking[:6]) if lacking else 'not in shape order, true first'}"
-                   f" ({len(got)} for {len(want)})")
-
-        for v in a["variants"]:
-            if not isinstance(v, dict):
-                g.fail(f"{w}: a variant {v!r}")
-                continue
-            s = f"{w} shape {v.get('shape')}" + ("" if v.get("bandMatch") is None else f" {v['bandMatch']}")
-            absent = [k for k in VARIANT_KEYS if k not in v]
-            if absent:
-                g.fail(f"{s}: no {', '.join(absent)}")
-                continue
-            variants += 1
-            shape = by_id.get(v["shape"]) if is_int(v["shape"]) else None
-            det = v["deterministic"]
-            if not isinstance(det, bool):
-                g.fail(f"{s}: deterministic {det!r}")
-                det = False
-            deterministic += det
-            if v["bandMatch"] is not None and not isinstance(v["bandMatch"], bool):
-                g.fail(f"{s}: bandMatch {v['bandMatch']!r}")
-            elif shape is not None and (v["bandMatch"] is None) == (shape.get("bandCondition") is True):
-                g.fail(f"{s}: bandMatch {v['bandMatch']!r} for a shape "
-                       f"{'with' if v['bandMatch'] is None else 'without'} a band condition")
-            n, cross, met = v["seeds"], v["crossSeeds"], v["seTargetMet"]
-            if not (is_int(n) and n >= 1 and isinstance(met, bool)):
-                g.fail(f"{s}: seeds {n!r}, seTargetMet {met!r}")
-            elif det and (n != 1 or not met):
-                g.fail(f"{s}: deterministic, but {n} seeds and seTargetMet {met}")
-            elif not det and batches and (n not in batches or (not met and n != batches[-1])):
-                g.fail(f"{s}: {n} seeds (seTargetMet {met}), not a batch of the seed rule {batches}")
-            elif not det and not met:
-                missed.append(f"{chart.get('scoreId')} shape {v['shape']}")
-            if (not is_int(cross) or cross < 1 or (is_int(n) and is_int(rule.get("crossSeeds"))
-                                                 and cross != min(n, rule["crossSeeds"]))):
-                g.fail(f"{s}: crossSeeds {cross!r}, expected min({n}, {rule['crossSeeds']})")
-
-            # every [mean, se]
-            values = {k: v[k] for k in VARIANT_PAIRS}
-            rs = v["ranges"]
-            if not isinstance(rs, list) or len(rs) != len(ranges):
-                g.fail(f"{s}: {len(rs) if isinstance(rs, list) else repr(rs)} range results for {len(ranges)} ranges")
-                rs = []
-            for j, r in enumerate(rs):
-                for k in VARIANT_RANGE_PAIRS:
-                    values[f"ranges[{j}].{k}"] = r.get(k) if isinstance(r, dict) else None
-            wt, rw = v["weights"], v["rangeWeights"]
-            if plain is None:
-                if wt is not None or rw is not None:
-                    g.fail(f"{s}: weights or rangeWeights without a plain kind")
-            else:
-                if not (isinstance(wt, list) and len(wt) == positions):
-                    g.fail(f"{s}: weights are not one [mean, se] per position")
-                else:
-                    values.update({f"weights[{k}]": x for k, x in enumerate(wt)})
-                if not linear:
-                    if rw is not None:
-                        g.fail(f"{s}: rangeWeights, but deck.seeds[0].rangeWeights is null")
-                elif not (isinstance(rw, list) and len(rw) == positions and all(
-                        isinstance(x, list) and len(x) == len(ranges) for x in rw)):
-                    g.fail(f"{s}: rangeWeights are not [position][range] [mean, se]")
-                else:
-                    values.update({f"rangeWeights[{k}][{j}]": y for k, x in enumerate(rw) for j, y in enumerate(x)})
-            bad = [k for k, x in values.items() if not pair(x)]
-            if bad:
-                g.fail(f"{s}: {', '.join(bad[:6])}{' ...' if len(bad) > 6 else ''} not [mean, se] (finite, se >= 0)")
-            elif det and any(x[1] for x in values.values()):
-                g.fail(f"{s}: deterministic, but a standard error is not 0: "
-                       f"{', '.join(k for k, x in values.items() if x[1])[:160]}")
-            elif rs and all(pair(r.get(k)) for r in rs for k in ("rangeScore", "rankBonus")):
-                inside = sum(r["rangeScore"][0] + r["rankBonus"][0] for r in rs)
-                if abs(v["tail"][0] - (v["score"][0] - inside)) > (
-                        0.0005 * (2 + 2 * len(rs)) + APTITUDE_SLACK):
-                    g.fail(f"{s}: tail {v['tail'][0]} is not score {v['score'][0]} less the ranges' rangeScore and "
-                           f"rankBonus {inside}")
-
-            # Perfect rank-bonus deltas are not exported. Only a necessary rounding bound can be checked
-            # for stochastic means: each difference of two truncated bonuses is within 2 points of delta*p/100.
-            if not bad and len(rs) == len(ranges):
-                perfect_terms = [r["rangeScorePerfect"][0] * (1 + info["rankBonusPercent"] / 100)
-                                 for r, info in zip(rs, ranges, strict=True)]
-                rounding = 0.001 + sum(0.0005 * abs(1 + info["rankBonusPercent"] / 100) for info in ranges)
-                residual = v["scorePerfect"][0] - v["tailPerfect"][0] - sum(perfect_terms)
-                if abs(residual) > 2 * len(ranges) + rounding + APTITUDE_SLACK:
-                    g.fail(f"{s}: tailPerfect violates the necessary Perfect rank-bonus rounding bound")
-
-            # Deterministic point deltas are integers. Perfect rank bonuses can then be recovered exactly
-            # from the first baseline seed (stochastic Perfect rank-bonus deltas are not exported).
-            if det and not bad and rs and dseeds:
-                points = [x[0] for k, x in values.items() if not k.startswith(("weights", "rangeWeights"))]
-                if not all(float(x).is_integer() for x in points):
-                    g.fail(f"{s}: deterministic, but a point delta is not an integer")
-                else:
-                    perfect = 0
-                    for r, info, base in zip(rs, ranges, dseeds[0]["ranges"], strict=True):
-                        delta, baseline = int(r["rangeScorePerfect"][0]), base["rangeScorePerfect"]
-                        percent = info["rankBonusPercent"]
-                        perfect += delta + rank_bonus(baseline + delta, percent) - rank_bonus(baseline, percent)
-                    if v["tailPerfect"][0] != v["scorePerfect"][0] - perfect:
-                        g.fail(f"{s}: tailPerfect is not scorePerfect less the Perfect range scores and bonuses")
-
-            # the check
-            c = v["check"]
-            if not (isinstance(c, dict) and all(k in c for k in APTITUDE_CHECK_KEYS)):
-                g.fail(f"{s}: the check has no {', '.join(APTITUDE_CHECK_KEYS)}")
-                continue
-            if dseeds and c["seed"] != dseeds[0].get("seed"):
-                g.fail(f"{s}: the check's seed {c['seed']!r} is not deck.seeds[0]'s {dseeds[0].get('seed')!r}")
-            ranks = c["ranks"]
-            if not (isinstance(ranks, list) and len(ranks) == len(ranges)
-                    and all(is_int(x) and 1 <= x <= RANKS for x in ranks)):
-                g.fail(f"{s}: the check's ranks {ranks!r} are not one rank per range")
-            elif not linear and any(x != 1 for x in ranks):
-                g.fail(f"{s}: the check's ranks {ranks} on a chart whose ranks are not linear (rank 1 alone)")
-            cd = c["deck"]
-            if not (isinstance(cd, list) and len(cd) == positions and all(
-                    x is None or (plain is not None and isinstance(x, list) and len(x) == 2 and x[0] == plain
-                                  and is_num(x[1])) for x in cd)):
-                g.fail(f"{s}: the check deck is not a [plain kind, value] or null per position")
-            if not within(c):
-                g.fail(f"{s}: the check is not within its bound")
-    if missed:
-        g.fail(f"{len(missed)} variants missed the seed rule's standard error target: {', '.join(missed[:10])}"
-               + (" ..." if len(missed) > 10 else ""))
-    g.note = (f"{len(shapes)} shapes; {aptitudes} charts with an aptitude, {nulls} null; {variants} variants, "
-              f"{deterministic} deterministic; plain kind {plain}")
 
 
 def gate_gzip(doc, ctx: Context, g: Gate, raw: bytes):
