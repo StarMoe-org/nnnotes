@@ -129,18 +129,15 @@ def test_workflows_isolate_regions_and_share_publication_lock():
     root = Path(__file__).resolve().parents[1] / "workflows"
     wrapper = (root / "music-data.yml").read_text()
     normal = (root / "music-data-region.yml").read_text()
-    prebuilt = (root / "music-data-prebuilt.yml").read_text()
     assert "fail-fast: false" in wrapper and "'hk-tw-mo jp'" in wrapper
     assert "group: music-data-${{ matrix.region }}" in wrapper
-    assert "group: music-data-${{ inputs.region }}" in prebuilt
-    for workflow in (normal, prebuilt):
-        assert "MUSIC_DATA_MASTERDATA_REGION == 'jp' && vars.MUSIC_DATA_S3_PREFIX" in workflow
-        assert "MUSIC_DATA_MASTERDATA_REGION != 'jp' && vars.MUSIC_DATA_S3_PREFIX" in workflow
-        assert "MASTERDATA_REGION: ${{ inputs.region }}" in workflow
-        assert "MUSIC_DATA_TW_PREFIX_CHECK:" in workflow
-        assert "MUSIC_DATA_JP_PREFIX_CHECK:" in workflow
-        test_step = workflow[workflow.index("Gate self-test"):]
-        assert "test_music_data_refresh.py" in test_step.split("- name:", 1)[0]
+    assert "MUSIC_DATA_MASTERDATA_REGION == 'jp' && vars.MUSIC_DATA_S3_PREFIX" in normal
+    assert "MUSIC_DATA_MASTERDATA_REGION != 'jp' && vars.MUSIC_DATA_S3_PREFIX" in normal
+    assert "MASTERDATA_REGION: ${{ inputs.region }}" in normal
+    assert "MUSIC_DATA_TW_PREFIX_CHECK:" in normal
+    assert "MUSIC_DATA_JP_PREFIX_CHECK:" in normal
+    test_step = normal[normal.index("Gate self-test"):]
+    assert "test_music_data_refresh.py" in test_step.split("- name:", 1)[0]
 
 
 @pytest.mark.parametrize("tw,jp", [("jp/music-data", "jp/music-data"),

@@ -5,7 +5,7 @@ checks the affected enabled regions; an older dispatch without a region list che
 one region. The matrix has `fail-fast: false`, so an unavailable JP source does not cancel TW. Each region calls
 `music-data-region.yml` with its package, catalog, client and output prefix: TW `music-data`, JP `jp/music-data`.
 The previous global `MUSIC_DATA_MASTERDATA_REGION` no longer selects which regions run; it only preserves ownership
-of a legacy `MUSIC_DATA_S3_PREFIX` (JP-owned prefixes remain JP). Both normal and prebuilt reject equal effective
+of a legacy `MUSIC_DATA_S3_PREFIX` (JP-owned prefixes remain JP). Publication rejects equal effective
 TW/JP prefixes before publication, including slash-normalized duplicates. See [Japanese release](../docs/jp.md)
 for setup and validation limits; enabling the matrix does not certify a new client model or guarantee JP availability.
 
@@ -137,10 +137,9 @@ missed, and `workflow_dispatch`:
 | `dry_run` | build and check, then list what would be uploaded instead of uploading |
 | `reencode_only` | verify and gzip the currently published snapshot without compiling Rust or recomputing statistics |
 
-Normal and prebuilt writers share `music-data-<region>` concurrency with cancellation disabled. TW and JP have
+Runs of one region share `music-data-<region>` concurrency with cancellation disabled. TW and JP have
 separate output prefixes and can proceed independently. Prefix overrides must remain distinct between regions.
-The two dedicated `songs/` page writers also share `songs-page-publication`; prebuilt acquires that global lock
-before its data-region lock. Story publication does not write the dedicated `songs/` closure.
+The dedicated `songs/` page writer holds `songs-page-publication`. Story publication does not write the dedicated `songs/` closure.
 
 `reencode_only=true` requires every current gate attestation, the unchanged source identity and build marker, all
 13 same-source labels, and every decoded replay/archive/engine hash. It first writes a content-addressed gzip probe
@@ -195,7 +194,7 @@ legitimate drop (a song the game removed) stops the run: a person checks it, the
 The self-test runs in each build and locally in seconds, without the network:
 
 ```
-python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py .github/scripts/test_music_data_compression.py .github/scripts/test_prebuilt_source_identity.py
+python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py .github/scripts/test_jp_workflow.py .github/scripts/test_music_data_refresh.py .github/scripts/test_music_data_compression.py
 ```
 
 with, optionally, `MUSIC_DATA_SCHEMA` (a schema file when the checkout has none), `MUSIC_DATA_PAGE` (an
@@ -250,7 +249,7 @@ Repository variables:
   [moenotes#7](https://github.com/nichinichisou0609/moenotes/pull/7), stacked on the deck-goal repair in
   [moenotes#6](https://github.com/nichinichisou0609/moenotes/pull/6).
 - **Producer and publication.** This checkout publishes only the new nominal format and starts a fresh native
-  cache namespace; it does not migrate old Python cache records. Run the normal or prebuilt publication gates
+  cache namespace; it does not migrate old Python cache records. Run the publication gates
   with the matching engines and consumers. Set `MUSIC_DATA_PUBLISH` to `true` after the dry run passes.
 
 ## Notes
@@ -266,8 +265,8 @@ Repository variables:
   uploaded as an artifact.
 # HTTP compression
 
-Normal and validated-prebuilt publication uploads every JSON object at its existing `.json` URL with `Content-Type: application/json` and `Content-Encoding: gzip`. Compression uses gzip level 6 and `mtime=0`; engine JavaScript, WASM and images remain unchanged. Manifest SHA-256 values and byte counts always describe the decoded payload consumed by browser `fetch`. S3 metadata records `decoded-sha256`, `decoded-bytes`, `encoded-sha256` and `encoded-bytes` separately. Read-back gates verify both stored identity and decoded identity before advancing pointers. Python public-source reads explicitly decode the HTTP content encoding.
+Publication uploads every JSON object at its existing `.json` URL with `Content-Type: application/json` and `Content-Encoding: gzip`. Compression uses gzip level 6 and `mtime=0`; engine JavaScript, WASM and images remain unchanged. Manifest SHA-256 values and byte counts always describe the decoded payload consumed by browser `fetch`. S3 metadata records `decoded-sha256`, `decoded-bytes`, `encoded-sha256` and `encoded-bytes` separately. Read-back gates verify both stored identity and decoded identity before advancing pointers. Python public-source reads explicitly decode the HTTP content encoding.
 
-To re-encode an already published, verified snapshot without running Rust or generating a replacement model, dispatch `music-data.yml` with `reencode_only=true`, the target `region`, and `dry_run=false`. This path shares the normal/prebuilt region lock. It requires the current source identity, an unchanged published build marker, all gate attestations, the complete SHA-bound replay runtime and all 13 Snap label tables. It checks source and marker again before each read/write, first verifies the store/CDN using a fresh gzip probe, then re-encodes the JSON payloads and externally verifies headers, stored identity and decoded identity. Manifest, music-data and build-marker decoded bytes never change. The encoding report records every object and total encoded/decoded size; it contains no game payloads or credentials.
+To re-encode an already published, verified snapshot without running Rust or generating a replacement model, dispatch `music-data.yml` with `reencode_only=true`, the target `region`, and `dry_run=false`. This path shares the region lock. It requires the current source identity, an unchanged published build marker, all gate attestations, the complete SHA-bound replay runtime and all 13 Snap label tables. It checks source and marker again before each read/write, first verifies the store/CDN using a fresh gzip probe, then re-encodes the JSON payloads and externally verifies headers, stored identity and decoded identity. Manifest, music-data and build-marker decoded bytes never change. The encoding report records every object and total encoded/decoded size; it contains no game payloads or credentials.
 
 JP builds perform an actual CDN-authentication preflight before Rust/WASM allocation. A refused `Version` call remains a failed JP update; it cannot substitute another region or bypass authenticated snapshot checks. Report artifacts use canonical workspace paths so `upload-artifact@v7` can retain diagnostics.
