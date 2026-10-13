@@ -83,19 +83,19 @@ extend the existing linear plain-skill UI domain or derive source rank threshold
 
 1. **plan** (seconds): the inputs of a build, from `index.json` of moenotes-masterdata-sync (the snapshot's master
    data version, resource version, client version, manifest hash and decoded file-inventory hash of the selected region)
-   and the checkout (the
-   ournotes-deck commit `rust/Cargo.lock` pins for the `ournotes-sim` package, the last nnnotes commit that changed `src/`, `rust/` or
-   `pyproject.toml`, consumer repository/ref and `RECIPE` of `music_data.py`), against `inputs` of the published `build.json`. The same
+   and the installed nnnotes release of `.github/nnnotes.txt` (its version, the ournotes-deck commit of the
+   `ournotes-sim` release its extra `deck` pins), consumer repository/ref and `RECIPE` of `music_data.py`, against
+   `inputs` of the published `build.json`. The same
    inputs (and a published `music-data.json`): the run ends here. `force` builds anyway.
 2. **build**:
-   - the chart data page's modules (`examples/songs` of `MUSIC_DATA_PLAYER_REF`, not built), nnnotes with its deck
-     model (the install builds `nnnotes._deck`), the gate self-test, the APK (playfetch with `PLAYFETCH_CREDENTIALS`:
+   - the chart data page's modules (`examples/songs` of `MUSIC_DATA_PLAYER_REF`, not built), the nnnotes release of
+     `.github/nnnotes.txt` with its deck model (the package `ournotes-sim`), the gate self-test, the APK (playfetch with `PLAYFETCH_CREDENTIALS`:
      `provenance.client`; nnnotes also reads the bundles the APK carries, as in the story site's builds), the decoded
      master data of moenotes-masterdata-sync (every file SHA-256 checked against `index.json`, `MasterManifest.json`
      included);
    - the replay and recommendation engines: `ournotes-replay-wasm-v<version>.tar.gz` and
      `ournotes-recommend-wasm-v<version>.tar.gz` of the ournotes-deck release `v<version>`, the version of the
-     `ournotes-sim` package `rust/Cargo.lock` pins, each checked against the release's `SHA256SUMS`; nnnotes takes
+     installed `ournotes-sim`, each checked against the release's `SHA256SUMS`; nnnotes takes
      their web packages after checking each `build-info.json` (module, commit, file SHA-256) against its deck model;
    - `nnnotes music-data --decoded-master --jackets jackets --replay-dir replay --replay-engine ... --recommend-engine
      ... --stats-cache $MUSIC_DATA_STATS_CACHE -o music-data.json`: restores the region's native measurement
@@ -173,8 +173,8 @@ Every one must pass, else nothing is published. Warnings go to the job summary a
 | Gate | Checks |
 |---|---|
 | (build) | nnnotes' own checks: every table, chart and cue sheet read, every chart measured, the deck statistics cross-checked against the chart facts and the master data (the command writes no file otherwise) |
-| `schema` | the file against `docs/schema/music-data.schema.json` of the checkout (JSON Schema 2020-12), requiring `nnnotes.music-data/2` and `ournotes-deck.chart-stats/3` statistics |
-| `provenance` | `format`; `region` `tw`; `master.source` `api`; `master.version` equal to the snapshot's and its `MasterManifest.json`'s; every table's SHA-256 the manifest's, every decoded table read the one `index.json` lists; the song tables and the deck model's present; `deck.commit` the one `rust/Cargo.lock` pins; `exporter.version` the installed nnnotes; an APK version; a catalog SHA-256 (warning: the APK is another client version than the snapshot's) |
+| `schema` | the file against the music data schema the installed nnnotes ships (`nnnotes.schemas`, JSON Schema 2020-12), requiring `nnnotes.music-data/2` and `ournotes-deck.chart-stats/3` statistics |
+| `provenance` | `format`; `region` `tw`; `master.source` `api`; `master.version` equal to the snapshot's and its `MasterManifest.json`'s; every table's SHA-256 the manifest's, every decoded table read the one `index.json` lists; the song tables and the deck model's present; `deck.commit` the installed `ournotes-sim` release's; `exporter.version` the installed nnnotes; an APK version; a catalog SHA-256 (warning: the APK is another client version than the snapshot's) |
 | `counts` | no fewer songs and charts than the published file (warning: ids no longer in it) |
 | `deck` | native kinds, positive power, events and positions matching chart facts; explicit nominal `expectation` unless unplayable; replay seeds equal `[0]` without luck or the published prefix shared by luck charts; finite `[center, outward radius]` estimates, valid dimensions and deterministic counters; lottery estimates enclose zero outside luck ranges; complete expectation check decks within their bounds |
 | `scenarios` | exactly one deterministic Free Live `offSeeds` entry (seed 0, scalar score/weights and bounded check); five integer rank percentages per range; explicit best/Perfect scores and `rankBonusPerfect`; rank-weight dimensions and rank checks match the supported linear domain; nulls warn about unavailable rank or Free Live weights rather than becoming zero gains |
@@ -240,15 +240,9 @@ Repository variables:
 
 ## Before the first run
 
-- **Native model and engines.** The native program cache is supplied by
-  [ournotes-deck#44](https://github.com/empty-sekai/ournotes-deck/pull/44). The exact source revision in
-  `rust/Cargo.toml` and `rust/Cargo.lock` must also be available as a model release with both replay and
-  recommendation WASM packages. Building this source pin locally is supported before that release exists;
-  production publication still requires matching engine commit and source identities. If the release uses a
-  different commit after merging, update the Cargo revision and lockfile package version and rebuild the extension.
-  The publisher selects `v<version>` from that package version, so creating a new tag alone is insufficient.
-  Older engines, including an older release with the
-  same package version, must not be substituted or admitted by weakening the identity gate.
+- **Native model and engines.** The deck model is the `ournotes-sim` release that the installed nnnotes pins; the
+  publisher downloads the replay and recommendation WASM packages of that same release (`v<version>`), and nnnotes
+  rejects engines of any other release.
 - **Consumers.** Deploy readers for `nnnotes.music-data/2` and `ournotes-deck.chart-stats/3` before publishing new
   data. The default `MUSIC_DATA_PLAYER_REF` already selects the nominal-expectation consumer in
   [ournotes-player#18](https://github.com/empty-sekai/ournotes-player/pull/18); an explicit repository variable
@@ -261,9 +255,9 @@ Repository variables:
 
 ## Notes
 
-- **Versions.** A new ournotes-deck pin (`rust/Cargo.toml`, `rust/Cargo.lock`) or a new nnnotes commit in `src/`,
-  `rust/` or `pyproject.toml` reaches this fork with a sync, and the next run builds a new file. The deck
-  statistics may then differ: `provenance.deck.commit` and `build.json` name the commit.
+- **Versions.** The workflows install the nnnotes release named in `.github/nnnotes.txt`. Raising it (a new
+  nnnotes release, which may pin a new ournotes-deck release) changes the build's inputs, and the next run builds a
+  new file. The deck statistics may then differ: `provenance.deck.commit` and `build.json` name the commit.
 - **The page and the data.** The page's modules are pinned by `MUSIC_DATA_PLAYER_REF`: changing that pin or its
   repository is now a build input and starts a new check. Use an immutable commit to keep the consumer identity stable.
 - **Byte identity.** A build from the same inputs gives the same bytes (the file is canonical); the jackets'

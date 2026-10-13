@@ -3,7 +3,7 @@ fails on the defect it is there for. Runs in seconds, without the network:
 
     python -m pytest -q -p no:cacheprovider .github/scripts/test_music_data.py
 
-The JSON Schema gate uses docs/schema/music-data.schema.json (or $MUSIC_DATA_SCHEMA) when the checkout has it; the
+The JSON Schema gate uses the schema the installed nnnotes ships (nnnotes.schemas) when jsonschema is installed; the
 page smoke test runs when $MUSIC_DATA_PAGE names ournotes-player's examples/songs; a configured page requires its
 modules and Node.js. Real files, when named: $MUSIC_DATA_SAMPLE (a current nnnotes.music-data/2 file: the content gates
 pass) and $MUSIC_DATA_OLD_SAMPLE (a legacy sampled file: the deck gate rejects its missing nominal expectations).
@@ -33,11 +33,9 @@ DECK = "d4" * 20
 CONTENT = ("deck", "scenarios", "finite", "references", "bgm")
 
 
-def schema_path():
-    p = Path(os.environ.get("MUSIC_DATA_SCHEMA") or ROOT / music_data.SCHEMA)
-    if not p.is_file():
-        return None
-    return p if importlib.util.find_spec("jsonschema") else None
+def schema():
+    """The music data's JSON Schema, or None without jsonschema."""
+    return music_data.schema() if importlib.util.find_spec("jsonschema") else None
 
 
 def page_path():
@@ -233,7 +231,7 @@ def context(tmp_path: Path, doc: dict, **kw) -> tuple[bytes, Context]:
     (tmp_path / "music-data.json").write_bytes(raw)
     ctx = Context(region="tw", language="zh-Hant", master=master,
                   snapshot={"entry": {"version": "v-test", "client_version": "1.0.1"}, "files": files},
-                  deck_commit=DECK, nnnotes_version="0.1.2", jackets=jackets, schema=schema_path(), published=None,
+                  deck_commit=DECK, nnnotes_version="0.1.2", jackets=jackets, schema=schema(), published=None,
                   page=None, file=tmp_path / "music-data.json")
     for k, v in kw.items():
         setattr(ctx, k, v)
@@ -289,8 +287,8 @@ def test_the_sample_passes_every_gate(tmp_path):
 
 
 def test_schema(tmp_path):
-    if schema_path() is None:
-        pytest.skip("no docs/schema/music-data.schema.json (a fork not synced with upstream) or no jsonschema")
+    if schema() is None:
+        pytest.skip("no jsonschema")
     doc = sample()
     doc["songs"][0]["charts"][0]["level"] = "10"
     g = gate(run(tmp_path, doc), "schema")
@@ -419,7 +417,7 @@ def unplayable(doc):
     (lambda d: d["provenance"]["master"]["tables"]["MasterText"].update(sha256="00" * 32), "provenance",
      "MasterText.sha256 is not"),
     (lambda d: d["provenance"]["master"]["tables"].pop("MasterBand"), "provenance", "lacks MasterBand"),
-    (lambda d: d["provenance"]["deck"].update(commit="ee" * 20), "provenance", "rust/Cargo.lock pins"),
+    (lambda d: d["provenance"]["deck"].update(commit="ee" * 20), "provenance", "the installed deck model is"),
     (lambda d: d["provenance"]["exporter"].update(version="0.0.9"), "provenance", "installed nnnotes"),
     (lambda d: d["provenance"]["client"].update(versionName=None), "provenance", "no APK version"),
 ])
@@ -534,16 +532,23 @@ def test_report_markdown(tmp_path):
     assert "- scenarios failure: chart 10 (100001 easy): offSeeds missing or not exactly one entry" in text_
 
 
-def test_deck_package_from_cargo_lock(tmp_path):
-    lock = tmp_path / "rust" / "Cargo.lock"
-    lock.parent.mkdir()
-    lock.write_text('[[package]]\nname = "pyo3"\nversion = "0.29.0"\n\n[[package]]\nname = "ournotes-sim"\n'
-                    'version = "0.0.1"\nsource = "git+https://github.com/empty-sekai/ournotes-deck?rev=' + "a" * 40
-                    + "#" + "b" * 40 + '"\n', encoding="utf-8")
-    assert music_data.deck_package(tmp_path) == ("0.0.1", "b" * 40)
-    assert music_data.deck_commit(tmp_path) == "b" * 40
-    with pytest.raises(SystemExit, match="sync the fork"):
-        music_data.deck_commit(tmp_path / "nowhere")
+@pytest.mark.parametrize("commit", ["b" * 40, None])
+def test_deck_package_is_the_installed_release(monkeypatch, commit):
+    module = type(sys)("ournotes_sim")
+    module.info = lambda: {"name": "ournotes-deck", "version": "0.0.1", "commit": commit}
+    monkeypatch.setitem(sys.modules, "ournotes_sim", module)
+    if commit is None:
+        with pytest.raises(SystemExit, match="not a release build"):
+            music_data.deck_package()
+        return
+    assert music_data.deck_package() == ("0.0.1", "b" * 40)
+    assert music_data.deck_commit() == "b" * 40
+
+
+def test_deck_package_needs_the_deck_model(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ournotes_sim", None)
+    with pytest.raises(SystemExit, match="extra deck"):
+        music_data.deck_package()
 
 
 # ---------------------------------------------------------------- real files (when named)

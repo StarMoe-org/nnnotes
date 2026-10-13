@@ -100,16 +100,11 @@ jobs:
         # The runner's preinstalled SDKs take most of its disk; a story build keeps its bundles and work files.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL && df -h "$GITHUB_WORKSPACE"
 
-      - uses: Swatinem/rust-cache@v2          # the install builds the extension module nnnotes._deck (rust/)
-        with:
-          workspaces: rust
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - name: Install nnnotes
-        # UnityPy 1.25.x requires etcpak, which has no manylinux x86_64 wheel on PyPI (only PyPy / cp37), so the
-        # runner's cp313 environment cannot resolve it. pyproject.toml already pins it to the 1.24 line.
-        run: uv pip install --system -e ".[fonts]" boto3
+        run: uv pip install --system -r .github/nnnotes.txt boto3
 
       - name: Tools
         run: |

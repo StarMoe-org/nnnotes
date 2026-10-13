@@ -4,8 +4,8 @@ decoded master data, checked by quality gates and published into the story site'
 (music-data.json, jackets/, archive/, build.json) for the chart data page of ournotes-player (examples/songs).
 
     plan                  the inputs of a build (the master data snapshot of $MASTERDATA_REGION in index.json, the
-                          deck commit rust/Cargo.lock pins, the last nnnotes commit of src/, rust/ and pyproject.toml,
-                          RECIPE) against those of the published build.json; GitHub output `build`: true when they
+                          installed nnnotes version and the ournotes-deck release of its deck model, RECIPE) against
+                          those of the published build.json; GitHub output `build`: true when they
                           differ, nothing is published or $FORCE is true
     master OUT            every file of the snapshot of $MASTERDATA_REGION into OUT (SHA-256 checked against
                           index.json, MasterManifest.json included) and its index entry as OUT.snapshot.json
@@ -57,8 +57,6 @@ BUILD_FORMAT = "moenotes.music-data-build/1"
 RECIPE = 8
 FILE, FILE_BR, MARKER, JACKETS, ARCHIVE = "music-data.json", "music-data.json.br", "build.json", "jackets/", "archive/"
 MANIFEST = "MasterManifest.json"
-SOURCE_PATHS = ("src", "rust", "pyproject.toml")    # nnnotes' code: the commit that last changed one of them
-SCHEMA = Path("docs/schema/music-data.schema.json")
 SMOKE = Path(__file__).resolve().parent / "music_data_smoke.mjs"
 ARCHIVE_CACHE = story_site.ASSET_CACHE              # archive/<version>/<sha256>.json: content-addressed
 RUNTIME_CACHE = story_site.ASSET_CACHE              # replay/<manifest sha256>/...: content-addressed
@@ -89,8 +87,8 @@ SONG_TABLES = ("MasterLiveMusic", "MasterLiveMusicScore", "MasterText", "MasterB
 REPLAY_LABEL_TABLES = ("MasterSupportSkill", "MasterSupportSkillEffect", "MasterGekisouSupportSkill",
                        "MasterGekisouSupportSkillEffect", "MasterText", "MasterSkillConditionSet", "MasterSkillCondition",
                        "MasterSkillCumulativeCondition", "MasterSkillTarget", "MasterCharacter", "MasterMemberCard", "MasterSupportCard", "MasterBand")
-# the web WASM packages (replay, recommendation) of the ournotes-deck release of the pinned deck model: the release
-# tagged v<version> of the ournotes-sim package in rust/Cargo.lock
+# the web WASM packages (replay, recommendation) of the ournotes-deck release of the installed deck model: the release
+# tagged v<version> of the installed ournotes-sim
 DECK_RELEASES = "https://github.com/empty-sekai/ournotes-deck/releases/download"
 ENGINES = ("replay", "recommend")
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -156,44 +154,34 @@ def exists(key: str) -> bool:
 
 
 # ---------------------------------------------------------------- the inputs of a build
-def deck_package(root: Path = Path(".")) -> tuple[str, str]:
-    """The ournotes-sim package nnnotes builds its deck model with, in rust/Cargo.lock: its version and its
-    ournotes-deck commit."""
-    lock = root / "rust" / "Cargo.lock"
-    if not lock.is_file():
-        fail("no rust/Cargo.lock: this nnnotes has no music-data command with the deck model (sync the fork with "
-             "upstream, .github/MUSIC_DATA.md)")
-    for block in lock.read_text(encoding="utf-8").split("[[package]]"):
-        if re.search(r'^name = "ournotes-sim"$', block, re.M):
-            version = re.search(r'^version = "([^"]+)"$', block, re.M)
-            m = re.search(r'^source = "git\+[^"#]*#([0-9a-f]{40})"$', block, re.M)
-            if version and m:
-                return version.group(1), m.group(1)
-    fail("rust/Cargo.lock has no ournotes-sim git commit")
+def deck_package() -> tuple[str, str]:
+    """The ournotes-deck release of the installed deck model (the package ournotes-sim, nnnotes' extra deck): its
+    version and its commit."""
+    try:
+        import ournotes_sim
+    except ImportError:
+        fail("the deck model is not installed: install nnnotes with its extra deck (.github/nnnotes.txt)")
+    info = ournotes_sim.info()
+    if not COMMIT.fullmatch(str(info.get("commit"))):
+        fail(f"ournotes-sim {info.get('version')} is not a release build: it names no commit")
+    return info["version"], info["commit"]
 
 
-def deck_commit(root: Path = Path(".")) -> str:
-    """The ournotes-deck commit nnnotes builds its deck model with."""
-    return deck_package(root)[1]
+def deck_commit() -> str:
+    """The ournotes-deck commit of the installed deck model."""
+    return deck_package()[1]
 
 
-def nnnotes_commit(root: Path = Path(".")) -> str:
-    """The commit that last changed nnnotes' code (SOURCE_PATHS); the checkout needs its history."""
-    def git(*args):
-        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
-    if git("rev-parse", "--is-shallow-repository").stdout.strip() != "false":
-        fail("the checkout is shallow: the nnnotes commit needs the history (actions/checkout fetch-depth: 0)")
-    commit = git("log", "-1", "--format=%H", "--", *SOURCE_PATHS).stdout.strip()
-    if not COMMIT.fullmatch(commit):
-        fail("no commit changed src/, rust/ or pyproject.toml")
-    return commit
+def nnnotes_version() -> str:
+    """The version of the installed nnnotes."""
+    import nnnotes
+    return nnnotes.__version__
 
 
-def require_decoded_master(root: Path = Path(".")) -> None:
-    cli = root / "src" / "nnnotes" / "cli.py"
-    if "--decoded-master" not in cli.read_text(encoding="utf-8"):
-        fail("this nnnotes has no `music-data --decoded-master` (MetaSekaiLab/nnnotes#6): sync the fork with "
-             "upstream (.github/MUSIC_DATA.md)")
+def schema() -> dict:
+    """The JSON Schema of the music data, as the installed nnnotes ships it."""
+    from nnnotes import schemas
+    return schemas.load("music-data")
 
 
 def snapshot_identity(region: str, entry: dict, files: dict) -> dict:
@@ -211,13 +199,13 @@ def snapshot_identity(region: str, entry: dict, files: dict) -> dict:
             "decodedFilesSha256": sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode())}
 
 
-def inputs(entry: dict, root: Path = Path("."), *, files: dict | None = None) -> dict:
+def inputs(entry: dict, *, files: dict | None = None) -> dict:
     """What a build is made of: the master data snapshot, the deck model, nnnotes and this script."""
     identity = snapshot_identity(env("MASTERDATA_REGION"), entry, files) if files is not None else {
             "masterRegion": env("MASTERDATA_REGION"), "masterVersion": entry.get("version"),
             "resourceVersion": entry.get("resource_version"), "clientVersion": entry.get("client_version"),
             "resourceHash": entry.get("resource_hash"), "manifestSha256": entry.get("manifest_sha256")}
-    return {**identity, "deckCommit": deck_commit(root), "nnnotesCommit": nnnotes_commit(root),
+    return {**identity, "deckCommit": deck_commit(), "nnnotesVersion": nnnotes_version(),
             "playerRepository": os.environ.get("PLAYER_REPOSITORY"), "playerRef": os.environ.get("PLAYER_REF"),
             "recipe": RECIPE}
 
@@ -286,7 +274,6 @@ def short(v) -> str:
 def cmd_plan() -> None:
     require_distinct_region_prefixes()
     _, region = story_site.master_index()
-    require_decoded_master()
     now = inputs(region.get("entry") or {}, files=region["files"])
     raw = published(MARKER)
     marker = json.loads(raw) if raw else None
@@ -298,9 +285,9 @@ def cmd_plan() -> None:
     build = force or bool(changed)
     summary(f"### Music data\n\n- master: {now['masterVersion']} of {now['masterRegion']} (resource "
             f"{now['resourceVersion']}, client {now['clientVersion']}); deck {short(now['deckCommit'])}; nnnotes "
-            f"{short(now['nnnotesCommit'])}; recipe {RECIPE}\n- published: "
+            f"{now['nnnotesVersion']}; recipe {RECIPE}\n- published: "
             + (f"master {have.get('masterVersion')}, deck {short(have.get('deckCommit'))}, nnnotes "
-               f"{short(have.get('nnnotesCommit'))}, built {marker.get('builtAt')}" if isinstance(have, dict)
+               f"{have.get('nnnotesVersion')}, built {marker.get('builtAt')}" if isinstance(have, dict)
                else "nothing")
             + "\n- this run: " + ("builds" + (" (force)" if force else "") + (f", changed: {', '.join(changed)}"
                                                                               if changed and have else "")
@@ -345,8 +332,8 @@ def cmd_build(out: str) -> None:
     usage = subprocess.run(nnnotes + ["music-data", "--help"], capture_output=True, text=True).stdout
     if any(flag not in usage for flag in ("--decoded-master", "--replay-dir", "--replay-engine", "--recommend-engine",
                                           "--stats-cache")):
-        fail("the installed nnnotes lacks decoded-master/replay/recommend export or the statistics cache (sync the "
-             "fork with upstream)")
+        fail("the installed nnnotes lacks decoded-master/replay/recommend export or the statistics cache (raise the "
+             "version in .github/nnnotes.txt)")
     engine, recommend = release_engines(o)
     if env("MASTERDATA_REGION") == "jp":
         import jp_vpngate
@@ -372,9 +359,9 @@ def cmd_build(out: str) -> None:
 
 
 def release_engines(out: Path) -> tuple[Path, ...]:
-    """Download the web WASM packages (ENGINES) of the ournotes-deck release of the pinned deck model into OUT, each
-    checked against the release's SHA256SUMS; returns their paths. nnnotes checks each package's build-info.json
-    against the deck model it is built with."""
+    """Download the web WASM packages (ENGINES) of the ournotes-deck release of the installed deck model into OUT,
+    each checked against the release's SHA256SUMS; returns their paths. nnnotes checks each package's build-info.json
+    against the installed deck model."""
     version, _ = deck_package()
     base = f"{DECK_RELEASES}/v{version}"
     sums = {}
@@ -480,7 +467,7 @@ class Context:
     deck_commit: str | None = None
     nnnotes_version: str | None = None
     jackets: Path | None = None
-    schema: Path | None = None
+    schema: dict | None = None             # the music data's JSON Schema
     published: bytes | None = None          # the published music-data.json (None: nothing is published)
     page: Path | None = None                # examples/songs of ournotes-player
     file: Path | None = None                # the file on disk, for the smoke test
@@ -548,15 +535,11 @@ def gate_schema(doc, ctx: Context, g: Gate):
     if ctx.schema is None:
         g.note = "skipped"
         return
-    if not ctx.schema.is_file():
-        g.fail(f"no JSON Schema {ctx.schema}")
-        return
     import jsonschema
-    schema = json.loads(ctx.schema.read_text(encoding="utf-8"))
-    validator = jsonschema.Draft202012Validator(schema)
+    validator = jsonschema.Draft202012Validator(ctx.schema)
     for e in sorted(validator.iter_errors(doc), key=lambda e: list(map(str, e.absolute_path))):
         g.fail(f"{'/'.join(map(str, e.absolute_path)) or '(root)'}: {e.message[:160]}")
-    g.note = ctx.schema.as_posix()
+    g.note = ctx.schema.get("$id", "")
 
 
 def gate_provenance(doc, ctx: Context, g: Gate):
@@ -603,7 +586,7 @@ def gate_provenance(doc, ctx: Context, g: Gate):
         if deck.get("name") != "ournotes-deck" or not COMMIT.fullmatch(str(deck.get("commit"))):
             g.fail("provenance.deck names no ournotes-deck commit")
         elif ctx.deck_commit is not None and deck["commit"] != ctx.deck_commit:
-            g.fail(f"deck commit {deck['commit'][:12]}, rust/Cargo.lock pins {ctx.deck_commit[:12]}")
+            g.fail(f"deck commit {deck['commit'][:12]}, the installed deck model is {ctx.deck_commit[:12]}")
     ex = p.get("exporter") or {}
     if ex.get("name") != "nnnotes":
         g.fail(f"exporter {ex.get('name')!r}")
@@ -1175,7 +1158,7 @@ def cmd_check(out: str, master: str, page: str) -> None:
     snapshot = json.loads(snapshot_file(m).read_text(encoding="utf-8"))
     ctx = Context(region=env("NNNOTES_CATALOG_REGION"), language=os.environ.get("NNNOTES_CATALOG_LANGUAGE"),
                   master=m, snapshot=snapshot, deck_commit=deck_commit(), nnnotes_version=nnnotes.__version__,
-                  jackets=o / "jackets", schema=SCHEMA, published=published(FILE), page=Path(page), file=o / FILE)
+                  jackets=o / "jackets", schema=schema(), published=published(FILE), page=Path(page), file=o / FILE)
     report = gates(raw, ctx)
     replay_gate = {"gate":"replay", "passed":True,"failures":[],"failureCount":0,
                    "warnings":[],"warningCount":0,"note":""}
