@@ -54,7 +54,7 @@ jobs:
       fail-fast: false
       matrix:
         region: ${{ fromJSON(needs.regions.outputs.regions) }}
-    # The normal and prebuilt workflows serialize the same region's publication.
+    # Runs of the same region serialize their publication.
     concurrency:
       group: music-data-${{ matrix.region }}
       cancel-in-progress: false

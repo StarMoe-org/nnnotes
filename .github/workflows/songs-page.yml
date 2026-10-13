@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  # Full prebuilt publication also writes songs/. Keep the two releases ordered.
+  # One songs/ page publication at a time.
   group: songs-page-publication
   cancel-in-progress: false
 

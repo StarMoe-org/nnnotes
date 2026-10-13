@@ -876,14 +876,11 @@ def test_runtime_payload_cannot_escape_to_a_shared_mutable_key(tmp_path, monkeyp
     assert not s3.log
 
 
-def test_both_shared_songs_publishers_hold_one_global_lock_then_prebuilt_holds_region_lock():
+def test_the_songs_page_publisher_holds_the_global_lock():
     workflows = Path(__file__).resolve().parent.parent / "workflows"
-    prebuilt = (workflows / "music-data-prebuilt.yml").read_text()
     page = (workflows / "songs-page.yml").read_text()
-    for workflow in (prebuilt, page):
-        assert "\nconcurrency:\n" in workflow
-        assert "\n  group: songs-page-publication\n  cancel-in-progress: false" in workflow
-    assert "\n    concurrency:\n      group: music-data-${{ inputs.region }}\n      cancel-in-progress: false" in prebuilt
+    assert "\nconcurrency:\n" in page
+    assert "\n  group: songs-page-publication\n  cancel-in-progress: false" in page
 
 
 @pytest.mark.parametrize("defect", [None, "bytes", "region", "table_hash"])
