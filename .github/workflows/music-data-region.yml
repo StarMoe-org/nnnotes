@@ -36,7 +36,6 @@ env:
   PLAYFETCH_VERSION: ${{ vars.PLAYFETCH_VERSION || 'v0.92' }}
   APK_PACKAGE: ${{ inputs.region == 'jp' && 'com.bushiroad.sirius' || vars.STORY_APK_PACKAGE || 'com.bilibili.sirius' }}
   PYTHON_VERSION: "3.13"
-  PYTHONPATH: src
   WORK: ${{ github.workspace }}/music-data-work
   # Completed native programs, under the model source identity and compiled semantic inputs. A change to a
   # chart, kind or shape only recomputes affected programs; current metadata and checks are assembled each run.
@@ -58,11 +57,15 @@ jobs:
       build: ${{ steps.plan.outputs.build }}
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0          # the nnnotes commit: the last one that changed src/, rust/ or pyproject.toml
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install nnnotes
+        # the build's inputs name the installed nnnotes and the ournotes-deck release of its deck model
+        run: uv pip install --system -r .github/nnnotes.txt boto3
       - name: Inputs against the published build
         id: plan
         env:
@@ -76,16 +79,14 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+      - name: Install nnnotes
+        run: uv pip install --system -r .github/nnnotes.txt boto3 pytest jsonschema
       - name: APK
         env:
           PLAYFETCH_CREDENTIALS_JSON: ${{ secrets.PLAYFETCH_CREDENTIALS }}
@@ -96,7 +97,6 @@ jobs:
           NNNOTES_PATHS_APK: ${{ env.WORK }}/apk/base.apk
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq openvpn > /dev/null
-          uv pip install --system --only-binary=:all: UnityPy numpy grpcio pycryptodome brotli
           python .github/scripts/jp_vpngate.py watch > "$RUNNER_TEMP/jp-vpngate-watch.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/jp-vpngate-watch-shell.pid"
           for i in $(seq 1 60); do
@@ -115,13 +115,6 @@ jobs:
 
       - name: The chart data page
         run: .github/scripts/songs_page.sh "$WORK/page"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-      - name: Install nnnotes
-        # builds the extension module nnnotes._deck: the deck model at the commit rust/Cargo.toml pins
-        run: uv pip install --system -e ".[test]" boto3
 
       - name: Gate self-test
         env:

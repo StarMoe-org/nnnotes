@@ -11,8 +11,8 @@ from test_music_data import FakeS3, context, gate, gates, published_out, sample
 
 def test_same_version_table_change_rebuilds_but_check_timestamp_does_not(monkeypatch):
     monkeypatch.setenv("MASTERDATA_REGION", "jp")
-    monkeypatch.setattr(music_data, "deck_commit", lambda root: "a" * 40)
-    monkeypatch.setattr(music_data, "nnnotes_commit", lambda root: "b" * 40)
+    monkeypatch.setattr(music_data, "deck_commit", lambda: "a" * 40)
+    monkeypatch.setattr(music_data, "nnnotes_version", lambda: "0.2.0")
     entry = {"version": "same", "verified_at": "yesterday", "manifest_sha256": "c" * 64}
     files = {"MasterLiveScoreRank.json": "d" * 64, "MasterManifest.json": "c" * 64}
     before = music_data.inputs(entry, files=files)
@@ -42,8 +42,8 @@ def test_snapshot_identity_requires_a_consistent_manifest(files, entry):
 
 def test_changed_consumer_pin_rebuilds(monkeypatch):
     monkeypatch.setenv("MASTERDATA_REGION", "jp")
-    monkeypatch.setattr(music_data, "deck_commit", lambda root: "a" * 40)
-    monkeypatch.setattr(music_data, "nnnotes_commit", lambda root: "b" * 40)
+    monkeypatch.setattr(music_data, "deck_commit", lambda: "a" * 40)
+    monkeypatch.setattr(music_data, "nnnotes_version", lambda: "0.2.0")
     monkeypatch.setenv("PLAYER_REPOSITORY", "example/player")
     monkeypatch.setenv("PLAYER_REF", "first")
     before = music_data.inputs({})

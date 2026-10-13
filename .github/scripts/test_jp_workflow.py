@@ -90,8 +90,8 @@ def test_reject_mixed_master_and_catalog(monkeypatch):
 
 def test_asset_hash_changes_build_inputs(monkeypatch):
     monkeypatch.setenv('MASTERDATA_REGION', 'jp')
-    monkeypatch.setattr(music_data, 'deck_commit', lambda root: 'a' * 40)
-    monkeypatch.setattr(music_data, 'nnnotes_commit', lambda root: 'b' * 40)
+    monkeypatch.setattr(music_data, 'deck_commit', lambda: 'a' * 40)
+    monkeypatch.setattr(music_data, 'nnnotes_version', lambda: '0.2.0')
     a = music_data.inputs({'version': 'v', 'resource_hash': 'a' * 32})
     b = music_data.inputs({'version': 'v', 'resource_hash': 'b' * 32})
     assert a != b and a['resourceHash'] == 'a' * 32

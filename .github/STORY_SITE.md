@@ -8,7 +8,7 @@ lacks with this repository's `nnnotes web --story` and uploads them to the bucke
 published internationally and only builds stories missing from both sites. MoeNotes merges the two indexes and
 plays shared advIds from the international site, preserving all its text languages. It only adds: a run
 never deletes anything from the bucket. Its helper steps are in
-`.github/scripts/`; nothing outside `.github/` differs from upstream, so the fork syncs with it as before.
+`.github/scripts/`; it installs the nnnotes release named in `.github/nnnotes.txt`.
 
 ## A run
 
@@ -95,11 +95,12 @@ Repository variables (optional; the defaults are the StarMoe site): `STORY_S3_EN
   CDN authentication. Generated VPN profiles use connection fields and certificates, discarding supplied scripts
   and routes. The helpers are `jp_vpngate.py` and `story_site.py jp-check`.
 - **The player version.** The site's player pages come from `STORY_PLAYER_REF`, and its data must be what that player
-  reads. After a player release that changes the data format, sync this fork with upstream nnnotes and set
-  `STORY_PLAYER_REF` to the matching player; new stories are then written for it. Stories already published are
+  reads. After a player release that changes the data format, raise `.github/nnnotes.txt` to the nnnotes release
+  that writes it and set `STORY_PLAYER_REF` to the matching player; new stories are then written for it. Stories already published are
   not rebuilt (run with `stories` and `force` for that).
 - **The APK.** Google Play serves the current game version. When nnnotes' type trees do not match it, the build stops
-  naming the class and the Unity version: sync the fork with upstream once nnnotes supports that version.
+  naming the class and the Unity version: raise `.github/nnnotes.txt` once an nnnotes release supports that
+  version.
 - **Bytes.** A rebuild on the runner is not byte-identical to a build elsewhere: the AAC encoder (ffmpeg) and the PNG
   encoder (zlib) differ between machines. The pixels and every JSON value are the same, so new stories and the
   published ones fit together; only a forced rebuild re-uploads such files.
