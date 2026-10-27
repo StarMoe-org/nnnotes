@@ -1,3 +1,3 @@
 # The nnnotes release the publishing workflows install: music-data with its deck model (the extra deck, which
 # pins one ournotes-deck release) and the story site with the open fonts (the extra fonts).
-nnnotes[deck,fonts]==0.2.5
+nnnotes[deck,fonts]==0.2.6
